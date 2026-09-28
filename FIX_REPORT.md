@@ -203,3 +203,56 @@ The blast radius of this vulnerability spanned across five operational surfaces:
 | **Frontend Production Build** | `npm run build` (in `frontend/`) | **0 Errors, bundle verified (exit 0)** |
 | **Formal Model Verification** | `formal-model/TranscriptRegistry.tla` | **Invariants hold across all states** |
 
+---
+
+# Fix Report — Issues #555, #554, #551, #550 Comprehensive Remediation
+
+**Date:** 2026-09-26  
+**Issues Addressed:**  
+1. **#555**: `backend/.env.example` ANCHOR_USDC_URL ANCHOR_EURC_URL SOROSWAP_API HORIZON_URL Secrets Committed to git RELAYER_SECRET_KEY Pattern  
+2. **#554**: HORIZON_URL SOROBAN_RPC_URL stellar.expert Explorer hash Link testnet vs futurenet Mismatch Verifiable Explorer 404  
+3. **#551**: `prom-client` 15.1.3 Histogram +Inf Buckets route method status daoId Cardinality 10k  
+4. **#550**: OpenTelemetry spanContext config Sampling Head vs Tail PII blindingFactor Leak via Tail Sampling  
+
+---
+
+## 1. Summary of Changes & Audit Trail
+
+### Issue #555 — Committed Secrets & Secret Key Protection
+- **Root Cause**: Hardcoded asset issuer keys (`GDZRI...`, `GAML...`) and relayer secret pattern (`SDKA...`) present in development config and default fallbacks.
+- **Remediation**:
+  - Replaced hardcoded addresses in `backend/.env.development`, `backend/src/config.ts`, `backend/src/services/payments.ts`, and `frontend/src/config/contracts.ts` with standard base32 placeholders (`GXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX` and `SXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX`).
+  - Added secret detection to `.husky/pre-commit` to prevent staging or committing `SDKA...` or raw secret keys.
+
+### Issue #554 — Explorer Link Network Mismatch (testnet vs futurenet 404)
+- **Root Cause**: Explorer links in `Profile.tsx` and `DAOInfoPanel.tsx` were hardcoded to `testnet`, producing 404s when running on `futurenet` or `public` networks.
+- **Remediation**:
+  - Implemented network-aware `getExplorerUrl` helper in `frontend/src/lib/utils.ts` and `backend/src/utils/explorer.ts`.
+  - Dynamically routes explorer links to `/explorer/testnet/`, `/explorer/futurenet/`, or `/explorer/public/` depending on the active network configuration.
+
+### Issue #551 — Prometheus Metric High Cardinality & Histogram Bounding
+- **Root Cause**: `membershipRegistrationTotal` used `dao_id` as a label, and `normalizeRoute` did not sanitize raw IDs/hashes/addresses/query strings. With 10,000 DAOs, infinite metric series caused relayer OOM.
+- **Remediation**:
+  - Replaced `dao_id` label in `membershipRegistrationTotal` with bounded `status` label (`requested`, `submitted`, `limited`).
+  - Hardened `normalizeRoute` in `backend/src/services/metrics.ts` to strip query strings, 64-hex transaction hashes, Stellar addresses (`G...`, `C...`), and numeric route IDs.
+  - Added Prometheus alert `ZKVoteRelayerHighCardinalityMetricWarning` in `monitoring/prometheus/zkvote-alerts.yml`.
+
+### Issue #550 — OpenTelemetry PII `blindingFactor` Redaction & Sampling
+- **Root Cause**: Tail sampling exported raw attributes including `blindingFactor`, `nullifier`, and `relayer_secret` to external OTEL collectors.
+- **Remediation**:
+  - Added `"blindingfactor"` and `"blinding_factor"` to `SENSITIVE_ATTRIBUTE_PATTERNS` in `backend/src/services/tracing.ts`.
+  - Enforced `redactSpanAttributes` inside `exportSpan` in `tracing.ts` and `toOtlpSpan` in `otel.ts` so sensitive cryptographic attributes are hashed with salted sha256 before telemetry export.
+
+---
+
+## 2. Empirical Verification Matrix
+
+| Check | Command | Status |
+|---|---|---|
+| **Issues Regression Suite** | `node --experimental-strip-types --test test/issues-555-554-551-550.test.ts` | **Pass (exit 0)** |
+| **Secret Scan Pre-Commit** | `.husky/pre-commit` | **Pass (No leaked keys)** |
+| **Contract Workspace Build** | `cargo build --target wasm32v1-none --release` | **Pass (exit 0)** |
+| **Contract Integration Tests** | `cargo test -p zkvote-integration-tests -- --test-threads=1` | **Pass (exit 0)** |
+| **Frontend Build** | `npm run build` (in `frontend/`) | **Pass (exit 0)** |
+
+

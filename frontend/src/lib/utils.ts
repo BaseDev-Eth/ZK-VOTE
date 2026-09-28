@@ -23,6 +23,24 @@ export function truncateAddress(
 }
 
 /**
+ * Generate network-aware Stellar Expert link (testnet vs futurenet vs public)
+ */
+export function getExplorerUrl(
+  type: "tx" | "account" | "contract",
+  id: string,
+  networkName?: string,
+): string {
+  const envNet = (import.meta.env.VITE_STELLAR_NETWORK || import.meta.env.VITE_NETWORK_PASSPHRASE || "").toLowerCase();
+  const net = (networkName || envNet || "testnet").toLowerCase();
+  const pathNet = net.includes("future")
+    ? "futurenet"
+    : net.includes("main") || net.includes("public")
+      ? "public"
+      : "testnet";
+  return `https://stellar.expert/explorer/${pathNet}/${type}/${id}`;
+}
+
+/**
  * Truncate text to a maximum length
  * @param text Text to truncate
  * @param maxLength Maximum length before truncation (default: 30)

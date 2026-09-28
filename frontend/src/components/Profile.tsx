@@ -9,7 +9,7 @@ import {
   CardDescription,
 } from "./ui/Card";
 import { getZkVoteClient } from "../lib/client";
-import { truncateAddress } from "../lib/utils";
+import { truncateAddress, getExplorerUrl } from "../lib/utils";
 import { CheckCircle, XCircle, Loader2, Download, Upload } from "lucide-react";
 import Alert from "./ui/Alert";
 
@@ -171,7 +171,7 @@ export default function Profile({ publicKey, isConnected }: ProfileProps) {
                       <td className="px-4 py-3">{receipt.proposalId}</td>
                       <td className="px-4 py-3 font-mono text-xs">
                         <a
-                          href={`https://stellar.expert/explorer/testnet/tx/${receipt.txHash}`}
+                          href={getExplorerUrl("tx", receipt.txHash)}
                           target="_blank"
                           rel="noreferrer"
                           className="text-primary hover:underline"

@@ -137,9 +137,16 @@ export const configSchema = z
       .describe("Static verification key version override (0 = auto-detect)"),
 
     // ── CORS ────────────────────────────────────────────────────
+    CORS_ORIGINS: z
+      .string()
+      .optional()
+      .describe(
+        "Comma-separated allowed origins for CORS (production: required exact URLs, no wildcards)",
+      ),
+
     CORS_ORIGIN: optionalString
       .describe(
-        "Comma-separated allowed origins for CORS. Default: * (all origins)",
+        "Comma-separated allowed origins for CORS. Default: * (all origins) - DEPRECATED: Use CORS_ORIGINS",
       ),
 
     // ── Logging ─────────────────────────────────────────────────
@@ -421,9 +428,11 @@ export function validateConfig(
     staticVkVersion: raw.VOTING_VK_VERSION || undefined,
 
     // CORS
-    corsOrigins: raw.CORS_ORIGIN
-      ? raw.CORS_ORIGIN.split(",").map((o) => o.trim())
-      : ("*" as const),
+    corsOrigins: raw.CORS_ORIGINS
+      ? raw.CORS_ORIGINS.split(",").map((o) => o.trim()).filter(Boolean)
+      : raw.CORS_ORIGIN
+        ? raw.CORS_ORIGIN.split(",").map((o) => o.trim()).filter(Boolean)
+        : ("*" as const),
 
     // Logging
     logClientIp: raw.LOG_CLIENT_IP,

@@ -102,7 +102,7 @@ export const coalescingWaitTime = new Histogram({
 export const membershipRegistrationTotal = new Counter({
   name: "zkvote_membership_registration_requests_total",
   help: "Total commitment registration requests served by the membership route",
-  labelNames: ["dao_id"] as const,
+  labelNames: ["status"] as const,
   registers: [register],
 });
 
@@ -508,6 +508,27 @@ export const wsMessagesSent = new Counter({
   registers: [register],
 });
 
+export const wsAuthDuration = new Histogram({
+  name: "zkvote_ws_auth_duration_seconds",
+  help: "WebSocket authentication/handshake duration in seconds",
+  buckets: [0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1],
+  registers: [register],
+});
+
+export const wsMessageDuration = new Histogram({
+  name: "zkvote_ws_message_duration_seconds",
+  help: "WebSocket message processing duration in seconds",
+  buckets: [0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1],
+  registers: [register],
+});
+
+export const wsRateLimitTotal = new Counter({
+  name: "zkvote_ws_rate_limit_total",
+  help: "Total WebSocket connections blocked by rate limiting",
+  labelNames: ["ip"] as const,
+  registers: [register],
+});
+
 // ============================================
 // RELAYER KEY ROTATION METRICS (#177)
 // ============================================
@@ -546,16 +567,23 @@ export const relayerKeyTransactionsTotal = new Counter({
 
 /**
  * Normalise Express route path to a low-cardinality label.
- * Strips parameter values (e.g. /dao/123 -> /dao/:daoId)
+ * Strips parameter values, hashes, addresses, and query strings.
  */
 export function normalizeRoute(path: string): string {
   if (!path) return "unknown";
 
-  return path
-    .replace(/\/[0-9a-f]{20,}/g, "/:hash")
+  const cleanPath = path.split("?")[0];
+
+  return cleanPath
+    .replace(/\/[0-9a-f]{20,}/gi, "/:hash")
+    .replace(/\/[CG][A-Z2-7]{55}/g, "/:address")
     .replace(
-      /\/(dao|proposal|comment|events|bridge|circuits|ipfs)\/[^/]+/g,
+      /\/(dao|proposal|comment|comments|events|bridge|circuits|ipfs|membership|claim|pay|swap|ramp|nullifier|root|root-history)\/[^/]+/gi,
       "/$1/:param",
+    )
+    .replace(
+      /\/(proposal|nullifier|root-history|comments|comment)\/[^/]+\/[^/]+/gi,
+      "/$1/:param/:id2",
     )
     .replace(/\/(root|daos|ready|health|config|metrics|db)(\/|$)/g, "/$1$2");
 }

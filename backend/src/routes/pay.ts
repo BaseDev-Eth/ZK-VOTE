@@ -1,7 +1,7 @@
 // @ts-nocheck
 import { Router } from "express";
 import { sendPayment, sendBatch } from "../services/payments.js";
-import { bodyLimit, queryLimiter } from "../middleware/index.js";
+import { bodyLimit, queryLimiter, csrfOriginGuard } from "../middleware/index.js";
 import { log } from "../services/logger.js";
 
 console.error("PAY ROUTES LOADED", new Date().toISOString());
@@ -9,7 +9,7 @@ log("info", "pay_routes_loaded", {});
 
 const router = Router();
 
-router.post("/pay", bodyLimit("5kb"), async (req, res) => {
+router.post("/pay", csrfOriginGuard, bodyLimit("5kb"), async (req, res) => {
   console.error("PAY HANDLER CALLED", JSON.stringify(req.body).slice(0,100));
   log("info", "pay_hit", { body: req.body });
   try {
@@ -25,7 +25,7 @@ router.post("/pay", bodyLimit("5kb"), async (req, res) => {
 
 import { batch_partial_failure_total } from "../services/metrics.js";
 
-router.post("/pay/batch", bodyLimit("256kb"), async (req, res) => {
+router.post("/pay/batch", csrfOriginGuard, bodyLimit("256kb"), async (req, res) => {
   try {
     const { ops } = req.body;
     if (!Array.isArray(ops)) return res.status(400).json({ error: "ops array required" });

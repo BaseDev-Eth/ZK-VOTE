@@ -118,6 +118,7 @@ const SENSITIVE_ATTRIBUTE_PATTERNS = [
   "commitment",
   "blinding",
   "blinding_factor",
+  "blindingfactor",
   "salt",
   "secret",
   "secret_key",
@@ -257,9 +258,13 @@ export class InMemorySpanExporter implements SpanExporter {
 }
 
 async function exportSpan(span: ExportedSpan): Promise<void> {
+  const safeSpan: ExportedSpan = {
+    ...span,
+    attributes: redactSpanAttributes(span.attributes),
+  };
   for (const exporter of exporters) {
     try {
-      await exporter.export(span);
+      await exporter.export(safeSpan);
     } catch {
       // Telemetry must never make the pipeline fail or replay a ledger range.
     }
