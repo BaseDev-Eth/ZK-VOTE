@@ -58,6 +58,38 @@ success "Deployment version: $DEPLOY_VERSION"
 # Building everything together triggers Cargo feature unification that turns on
 # num-traits' float impls, which fail to compile on newer rustc (>=1.80) for
 # wasm32v1-none. Per-crate builds keep num-traits feature-minimal and succeed.
+#
+# TOOLCHAIN PARITY (#595): Soroban P25 hosts require the wasm32v1-none target.
+# A binary built for testnet with wasm32-unknown-unknown (or a stale
+# rust-toolchain.toml) deploys fine but fails at invoke time with a missing
+# bn254/poseidon host-function error. Fail fast here instead.
+step "Checking toolchain parity..."
+EXPECTED_TARGET="wasm32v1-none"
+if ! grep -q 'wasm32v1-none' rust-toolchain.toml 2>/dev/null; then
+  echo "ERROR: rust-toolchain.toml must pin targets = [\"wasm32v1-none\"] (Soroban P25). Refusing to deploy." >&2
+  exit 1
+fi
+if ! rustc --print target-list 2>/dev/null | grep -qx "$EXPECTED_TARGET"; then
+  echo "ERROR: target $EXPECTED_TARGET is not installed (rustup target add $EXPECTED_TARGET). Refusing to deploy." >&2
+  exit 1
+fi
+if grep -rn "wasm32-unknown-unknown" contracts/ Cargo.toml 2>/dev/null | grep -v "^Binary" | head -1; then
+  echo "ERROR: stale wasm32-unknown-unknown reference found in contracts/Cargo config. Use $EXPECTED_TARGET." >&2
+  exit 1
+fi
+# NETWORK PARITY: the RPC URL and passphrase must belong to the same network.
+# Deploying a testnet-passphrase build against the futurenet RPC (or vice
+# versa) produces signatures the network rejects at ingest.
+case "$RPC_URL" in
+  *futurenet*) EXPECTED_PASSPHRASE="Test SDF Future Network ; October 2022" ;;
+  *testnet*) EXPECTED_PASSPHRASE="Test SDF Network ; September 2015" ;;
+  *) EXPECTED_PASSPHRASE="" ;;
+esac
+if [ -n "$EXPECTED_PASSPHRASE" ] && [ "$NETWORK_PASSPHRASE" != "$EXPECTED_PASSPHRASE" ]; then
+  echo "ERROR: RPC/network mismatch: RPC_URL=$RPC_URL expects passphrase '$EXPECTED_PASSPHRASE' but NETWORK_PASSPHRASE='$NETWORK_PASSPHRASE'." >&2
+  exit 1
+fi
+success "Toolchain ($EXPECTED_TARGET) and network parity OK"
 step "Building all contracts..."
 for c in dao-registry membership-sbt membership-tree voting comments; do
   cargo build -p "$c" --target wasm32v1-none --release

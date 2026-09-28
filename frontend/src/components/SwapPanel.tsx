@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { Button } from "./ui/Button";
-import { relayerFetch } from "../lib/api";
+import { fetchSwapQuote, submitSwap } from "../lib/payments";
 
 type Asset = "XLM" | "USDC" | "EURC";
 
@@ -14,12 +14,8 @@ export default function SwapPanel() {
   const getQuote = async () => {
     setLoading(true);
     try {
-      const res = await relayerFetch(`/swap/quote?from=${from}&to=${to}&amount=${amount}`);
-      const text = await res.text();
-      let j: any = {};
-      try { j = text ? JSON.parse(text) : {}; } catch { j = {}; }
-      if (!res.ok) throw new Error(j.error || `HTTP ${res.status}`);
-      setQuote(j.destAmount || j.quote || `${amount} ${to} (real Horizon)`);
+      const q = await fetchSwapQuote(from, to, amount);
+      setQuote(`${q.destAmount} ${to} (real Horizon)`);
     } catch (e: any) {
       setQuote(`${amount} ${from} → ${amount} ${to} (fallback 1:1) ${e.message ? "(" + e.message + ")" : ""}`);
     } finally { setLoading(false); }
@@ -28,11 +24,7 @@ export default function SwapPanel() {
   const doSwap = async () => {
     setLoading(true);
     try {
-      const res = await relayerFetch(`/swap/submit`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ from, to, amount }) });
-      const text = await res.text();
-      let j: any = {};
-      try { j = text ? JSON.parse(text) : {}; } catch { j = { raw: text }; }
-      if (!res.ok) throw new Error(j.error || `HTTP ${res.status}: ${text.slice(0, 200)}`);
+      const j = await submitSwap({ from, to, amount });
       alert(j.hash ? `Swap submitted: ${j.hash}` : JSON.stringify(j));
     } catch (e: any) { alert(e.message); } finally { setLoading(false); }
   };

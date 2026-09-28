@@ -256,3 +256,28 @@ The blast radius of this vulnerability spanned across five operational surfaces:
 | **Frontend Build** | `npm run build` (in `frontend/`) | **Pass (exit 0)** |
 
 
+
+---
+
+## 3. Postmortem: pay/swap + toolchain + muxed + rotation incidents (#594, #595, #596, #597)
+
+### Issue #597 — OpenAPI drift: POST /pay/batch + swap routes missing from spec
+- **Blast radius (REST)**: `routes/pay.ts` served `POST /pay/batch` and `routes/swap.ts` served `GET /swap/quote` + `POST /swap/submit`, but `openapi.ts` `ENDPOINTS` had no entries, so `GET /openapi.json`, `GET /api-docs/openapi.json`, and generated clients (`api-types.ts`) 404'd on typed calls while curl worked.
+- **Blast radius (WS)**: none — pay/swap are request/response only; no confirmation-hub topics affected.
+- **Remediation**: added `payRequestSchema` / `payBatchRequestSchema` / `swapQuoteQuerySchema` / `swapSubmitRequestSchema` to `validation/schemas.ts` (single source of truth), registered 4 `ENDPOINTS` entries in `openapi.ts`, synced `backend/openapi.json` paths + component schemas, added typed `frontend/src/lib/payments.ts` client with explicit stale-spec 404 hints, and switched `PayPanel`/`SwapPanel` to it. `npm run docs:check` (CI-required) now covers these routes.
+- **Verification**: `npm run docs:check` in `backend/`; spike = typed `sendBatchPayment()` succeeds post-fix vs HTTP 404 on the stale generated client pre-fix.
+
+### Issue #595 — wasm32v1-none vs wasm32-unknown-unknown toolchain mismatch (Futurenet)
+- **Blast radius (circuit/contracts)**: testnet binary built with the wrong target deploys but fails at invoke on Futurenet (missing P25 bn254/poseidon host functions).
+- **Remediation**: `rust-toolchain.toml` already pins `wasm32v1-none`; added fail-fast parity assertions to `scripts/deploy/deploy-hosted-futurenet.sh` (rust-toolchain pin + installed target + no stale `wasm32-unknown-unknown` refs + RPC_URL/passphrase network match) and fixed stale `wasm32-unknown-unknown` references in `docs/contract-upgrade-framework.md` and `circuits/POSEIDON_KAT.md`.
+- **Verification**: deploy script aborts pre-build on mismatch (before) vs builds `target/wasm32v1-none/release/*.wasm` and deploys (after).
+
+### Issue #594 — Relayer M... vs G... muxed-account confusion (fund burn)
+- **Blast radius (REST)**: `POST /pay`, `POST /pay/batch`, `POST /swap/submit` accepted any string destination; an M... recipient paid via the bare G... base credited the shared balance — lost to the recipient.
+- **Remediation**: strict `classifyDestination` / `assertValidDestination` (StrKey `isValidEd25519PublicKey` / `isValidMed25519PublicKey` + regex fallback) enforced in `services/payments.ts` (single, batch pre-sign, swap) and in route-level zod `stellarDestinationSchema` (400, never 500, on invalid); frontend `lib/stellar-address.ts` (classify + SEP-7 QR parser) with inline G...-vs-M... warning in `PayPanel`; QR/memo fallback documented (memo only supplements, never substitutes for M...).
+- **Verification**: spike = `POST /pay {destination: <bare G... base of an M... recipient>}` — before: accepted and credited shared balance; after: still valid G... but UI warns, and any malformed M... is rejected 400 with `batch_partial_failure_total` semantics for batches.
+
+### Issue #596 — Secret rotation double-spend: withSequenceLock stale across RELAYER_SECRET_KEY rotation
+- **Blast radius (role/sequence)**: Soroban path used `withSequenceLock` + `sequenceManager.markDirty()` on `relayerKeyManager.onRotate`, but the Horizon classic path (`sendPayment` / `sendBatch` / `swapStrictSend`) loaded the account and submitted with no lock, so two signers could race one sequence under rotation → `tx_bad_seq` half-batch.
+- **Remediation**: wrapped all three Horizon submissions in `withSequenceLock` (whole batch build+sign+submit holds the lock), reusing the existing `stellar.ts` rotation hook (`markDirty` + hot-swap log) so post-rotation submissions resync instead of reusing the stale sequence. Scheduler wiring (`services.scheduler.start()` + `token:maintenance` via `JobScheduler.tick`) was verified already wired in `index.ts`.
+- **Verification**: spike = rotate under load — before: half-batch `tx_bad_seq`; after: serialized submissions, zero loss, `sequenceMismatchesTotal` / recovery path unchanged.

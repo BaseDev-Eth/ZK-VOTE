@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { Button } from "./ui/Button";
-import { relayerFetch } from "../lib/api";
+import { sendPayment, sendBatchPayment } from "../lib/payments";
+import { classifyStellarAddress, describeStellarAddress } from "../lib/stellar-address";
 
 type Asset = "XLM" | "USDC" | "EURC";
 
@@ -13,26 +14,25 @@ export default function PayPanel() {
 
   const send = async () => {
     if (!dest) return alert("Destination required (G... or M...)");
+    if (!classifyStellarAddress(dest)) {
+      return alert("Invalid destination: must be G... (56 chars) or M... (69 chars). M... and G... are not interchangeable.");
+    }
     setLoading(true);
     try {
-      const res = await relayerFetch("/pay", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ asset, destination: dest, amount, memo }) });
-      const text = await res.text();
-      let j: any = {};
-      try { j = text ? JSON.parse(text) : {}; } catch { j = { raw: text }; }
-      if (!res.ok) throw new Error(j.error || `HTTP ${res.status}: ${text.slice(0, 200)}`);
+      const j = await sendPayment({ asset, destination: dest.trim(), amount, memo: memo || undefined });
       alert(j.hash ? `Payment sent: ${j.hash}` : JSON.stringify(j));
     } catch (e: any) { alert(e.message); } finally { setLoading(false); }
   };
 
   const sendBatch = async () => {
-    const ops = Array.from({ length: 3 }, (_, i) => ({ destination: dest || "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF", asset, amount }));
+    const destination = dest.trim() || "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF";
+    if (!classifyStellarAddress(destination)) {
+      return alert("Invalid destination: must be G... or M...");
+    }
+    const ops = Array.from({ length: 3 }, () => ({ destination, asset, amount }));
     setLoading(true);
     try {
-      const res = await relayerFetch("/pay/batch", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ops }) });
-      const text = await res.text();
-      let j: any = {};
-      try { j = text ? JSON.parse(text) : {}; } catch { j = { raw: text }; }
-      if (!res.ok) throw new Error(j.error || `HTTP ${res.status}: ${text.slice(0, 200)}`);
+      const j = await sendBatchPayment(ops);
       alert(j.hash ? `Batch ${j.ops} sent: ${j.hash}` : JSON.stringify(j));
     } catch (e: any) { alert(e.message); } finally { setLoading(false); }
   };
@@ -47,6 +47,12 @@ export default function PayPanel() {
         <input value={amount} onChange={e => setAmount(e.target.value)} placeholder="Amount (7 decimals)" className="border rounded px-3 py-2 bg-background" />
       </div>
       <input value={dest} onChange={e => setDest(e.target.value)} placeholder="Destination G... or M... (muxed for inflow)" className="w-full border rounded px-3 py-2 bg-background font-mono text-sm" />
+      {dest && (
+        <p className={`text-xs ${classifyStellarAddress(dest) ? "text-muted-foreground" : "text-red-500"}`}>
+          {describeStellarAddress(dest)}
+          {classifyStellarAddress(dest) === "G" && " — warning: if the recipient gave you M..., paying the bare G... base loses the funds to the shared balance."}
+        </p>
+      )}
       <input value={memo} onChange={e => setMemo(e.target.value)} placeholder="Memo (optional)" className="w-full border rounded px-3 py-2 bg-background" />
       <div className="flex gap-2">
         <Button onClick={send} disabled={loading} className="flex-1">{loading ? "..." : "Send (withSequenceLock)"}</Button>
