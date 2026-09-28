@@ -1,16 +1,20 @@
 # Litestream configuration for ZK-VOTE SQLite Database Replication
 # Streams WAL changes continuously to S3 or compatible object storage (e.g. Tigris, Cloudflare R2, MinIO, GCS)
+# Enable this by setting LITESTREAM_S3ucket and related environment variables
 
 dbs:
   - path: ./data/zkvote.db
     replicas:
       - type: s3
-        bucket: ${LITESTREAM_S3_BUCKET}
+        bucket: ${LITESTREAM_S3_BUCKET:-}
         path: zkvote-db-replication
-        endpoint: ${LITESTREAM_S3_ENDPOINT}
+        endpoint: ${LITESTREAM_S3_ENDPOINT:-}
         region: ${AWS_REGION:-us-east-1}
-        access-key-id: ${AWS_ACCESS_KEY_ID}
-        secret-access-key: ${AWS_SECRET_ACCESS_KEY}
+        access-key-id: ${AWS_ACCESS_KEY_ID:-}
+        secret-access-key: ${AWS_SECRET_ACCESS_KEY:-}
         sync-interval: 1s
         retention: 720h # 30 days retention
         snapshot-interval: 24h
+        # Enable WAL mode verification
+        after-sync:
+          - PRAGMA wal_checkpoint(TRUNCATE)

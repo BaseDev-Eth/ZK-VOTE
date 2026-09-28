@@ -508,6 +508,27 @@ export const wsMessagesSent = new Counter({
   registers: [register],
 });
 
+export const wsAuthDuration = new Histogram({
+  name: "zkvote_ws_auth_duration_seconds",
+  help: "WebSocket authentication/handshake duration in seconds",
+  buckets: [0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1],
+  registers: [register],
+});
+
+export const wsMessageDuration = new Histogram({
+  name: "zkvote_ws_message_duration_seconds",
+  help: "WebSocket message processing duration in seconds",
+  buckets: [0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1],
+  registers: [register],
+});
+
+export const wsRateLimitTotal = new Counter({
+  name: "zkvote_ws_rate_limit_total",
+  help: "Total WebSocket connections blocked by rate limiting",
+  labelNames: ["ip"] as const,
+  registers: [register],
+});
+
 // ============================================
 // RELAYER KEY ROTATION METRICS (#177)
 // ============================================

@@ -28,7 +28,7 @@ kill_timeout = "35s"
   # old one is stopped, so there's no window with zero healthy instances.
   # release_command runs migration status check before deployment finishes.
   strategy = "rolling"
-  release_command = "node --enable-source-maps dist/services/migrate.js status"
+  release_command = "npm rebuild better-sqlite3 && node --enable-source-maps dist/services/migrate.js status"
 
 [http_service]
   internal_port = 8080

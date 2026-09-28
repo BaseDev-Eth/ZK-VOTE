@@ -167,7 +167,7 @@ app.use(
         objectSrc: ["'none'"],
         baseUri: ["'none'"],
         formAction: ["'none'"],
-        frameAncestors: ["'none'"],
+        frameAncestors: allowedCorsOrigins.includes("*") ? ["'none'"] : allowedCorsOrigins,
         blockAllMixedContent: [],
         upgradeInsecureRequests: [],
       },

@@ -2,7 +2,7 @@
 # Built ON the box from /opt/apps/zkvote/backend. Frontend is on Pages.
 
 # ---- builder ----
-FROM node:20-bookworm-slim AS builder
+FROM node:22-bookworm-slim AS builder
 # python3 + build-essential: only used if better-sqlite3 has no prebuilt for
 # this platform. Discarded with the builder stage either way.
 RUN apt-get update && apt-get install -y --no-install-recommends python3 build-essential \
@@ -16,7 +16,7 @@ RUN npm run build
 RUN npm prune --omit=dev
 
 # ---- runner ----
-FROM node:20-bookworm-slim AS runner
+FROM node:22-bookworm-slim AS runner
 ENV NODE_ENV=production PORT=8080
 WORKDIR /app
 COPY --from=builder --chown=node:node /app /app
