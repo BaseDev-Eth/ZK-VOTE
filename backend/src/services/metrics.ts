@@ -623,6 +623,30 @@ export const batch_partial_failure_total = new Counter({
 });
 
 // ============================================
+// BACKUP FORWARD-SECRECY METRICS (#600)
+// ============================================
+
+export const backupKeyRotationsTotal = new Counter({
+  name: "zkvote_backup_key_rotations_total",
+  help: "Total backup encryption key rotations (old key archived, new key active)",
+  labelNames: ["status"] as const,
+  registers: [register],
+});
+
+export const backupAgeSeconds = new Gauge({
+  name: "zkvote_backup_age_seconds",
+  help: "Age of the most recent successful backup in seconds (staleness signal for litestream/S3 DR)",
+  registers: [register],
+});
+
+export const backupRestoreDrillTotal = new Counter({
+  name: "zkvote_backup_restore_drill_total",
+  help: "Total encrypted restore drills run (verify/decrypt round-trip)",
+  labelNames: ["status"] as const,
+  registers: [register],
+});
+
+// ============================================
 // DAO END-TO-END RECONCILIATION METRICS (#577)
 // ============================================
 

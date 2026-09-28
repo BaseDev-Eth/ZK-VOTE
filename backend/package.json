@@ -5,7 +5,7 @@
   "type": "module",
   "packageManager": "npm@9.5.0",
   "engines": {
-    "node": "20.x",
+    "node": "22.x",
     "npm": "10.x"
   },
   "scripts": {
@@ -89,7 +89,7 @@
     "@types/cors": "2.8.17",
     "@types/express": "5.0.0",
     "@types/multer": "1.4.12",
-    "@types/node": "20.0.0",
+    "@types/node": "22.0.0",
     "@types/swagger-ui-express": "4.1.8",
     "@types/ws": "8.18.1",
     "chai": "5.3.3",
