@@ -1,17 +1,44 @@
 // @ts-nocheck
 import { Router } from "express";
 import { sendPayment, sendBatch } from "../services/payments.js";
-import { bodyLimit, queryLimiter, csrfOriginGuard } from "../middleware/index.js";
+import { bodyLimit, queryLimiter, csrfOriginGuard, paymentBatchCostLimiter, masterKeyGuard } from "../middleware/index.js";
 import { log } from "../services/logger.js";
+import { batch_partial_failure_total, paymentOpsPerMinute } from "../services/metrics.js";
 
-console.error("PAY ROUTES LOADED", new Date().toISOString());
 log("info", "pay_routes_loaded", {});
+
+// In-memory idempotency store (keyed by idempotency header)
+const paymentIdempotency = new Map<string, { hash: string; timestamp: number }>();
+
+// Clean up old entries every minute
+setInterval(() => {
+  const now = Date.now();
+  const expired = [];
+  for (const [key, value] of paymentIdempotency.entries()) {
+    if (now - value.timestamp > 60000) { // 1 minute
+      expired.push(key);
+    }
+  }
+  for (const key of expired) {
+    paymentIdempotency.delete(key);
+  }
+}, 60000);
 
 const router = Router();
 
-router.post("/pay", csrfOriginGuard, bodyLimit("5kb"), async (req, res) => {
-  console.error("PAY HANDLER CALLED", JSON.stringify(req.body).slice(0,100));
-  log("info", "pay_hit", { body: req.body });
+router.post("/pay", masterKeyGuard, csrfOriginGuard, bodyLimit("5kb"), async (req, res) => {
+  log("info", "pay_hit", {});
+  
+  // Check idempotency key
+  const idempotencyKey = req.header("Idempotency-Key");
+  if (idempotencyKey) {
+    const existing = paymentIdempotency.get(idempotencyKey);
+    if (existing) {
+      log("info", "payment_idempotent_hit", { idempotencyKey: idempotencyKey.slice(0, 16), hash: existing.hash });
+      return res.status(200).json({ hash: existing.hash, idempotent: true });
+    }
+  }
+  
   try {
     // #594/#597: single source of truth — same zod schemas as openapi.ts.
     const parsed = payRequestSchema.safeParse(req.body);
@@ -20,6 +47,12 @@ router.post("/pay", csrfOriginGuard, bodyLimit("5kb"), async (req, res) => {
     }
     const { asset, destination, amount, memo } = parsed.data as any;
     const r = await sendPayment({ asset, destination, amount, memo });
+    
+    // Store idempotency result
+    if (idempotencyKey) {
+      paymentIdempotency.set(idempotencyKey, { hash: r.hash, timestamp: Date.now() });
+    }
+    
     res.json(r);
   } catch (e: any) {
     console.error("PAY ERR", e.message, e.stack?.slice(0,500));
@@ -40,6 +73,12 @@ router.post("/pay/batch", csrfOriginGuard, bodyLimit("256kb"), async (req, res) 
     }
     const { ops } = parsed.data as any;
     const r = await sendBatch(ops);
+    
+    // Store idempotency result
+    if (idempotencyKey) {
+      paymentIdempotency.set(idempotencyKey, { hash: r.hash, timestamp: Date.now() });
+    }
+    
     res.json(r);
   } catch (e: any) {
     batch_partial_failure_total.inc({ batch_type: "payments", reason: String(e.message || "unknown") });

@@ -397,6 +397,45 @@ export async function withSequenceLock<T>(fn: () => Promise<T>): Promise<T> {
   }
 }
 
+/**
+ * Split-phase sequence lock: acquire for operations that modify sequence,
+ * then release before blocking on confirmation. Prevents unbounded waiters (#656).
+ * Caller acquires lock, performs submit within critical section, then calls
+ * releaseLockForConfirmation before waitForTransaction.
+ */
+let currentLockRelease: (() => void) | null = null;
+
+export async function acquireSequenceLockForSubmit(): Promise<void> {
+  if (config.clusterEnabled && nodeCluster.isWorker) {
+    await acquireClusterSequenceLock();
+    currentLockRelease = () => {
+      releaseClusterSequenceLock().catch((err) => {
+        log("warn", "cluster_lock_release_failed", { error: (err as Error).message });
+      });
+    };
+    return;
+  }
+
+  const previous = sequenceLock;
+  let resolve: () => void;
+  sequenceLock = new Promise<void>((r) => {
+    resolve = r;
+  });
+  inFlightLockOps++;
+  await previous;
+  currentLockRelease = () => {
+    resolve!();
+    inFlightLockOps--;
+  };
+}
+
+export function releaseLockForConfirmation(): void {
+  if (currentLockRelease) {
+    currentLockRelease();
+    currentLockRelease = null;
+  }
+}
+
 // ============================================
 // SOROBAN RPC CONNECTION POOL & CLIENT
 // ============================================
@@ -1186,5 +1225,15 @@ export function scheduleCoverTraffic(): void {
 
 export function monitorMissingVotes(): void {}
 export async function submitVoteViaRelayerQuorum(opts: { transaction: any; simulationResult?: any; daoId?: number; proposalId?: number; nullifier?: string }): Promise<any> {
-  return submitToRelayQuorum(opts.transaction);
+  if (!opts.simulationResult) {
+    throw new Error("simulationResult is required for transaction assembly");
+  }
+  // Assemble the transaction with simulation results (adds soroban auth, resource fees)
+  // then sign with the relayer keypair — without this the envelope has zero signatures
+  // and the network rejects with tx_bad_auth.
+  const preparedTx = StellarSdk.rpc
+    .assembleTransaction(opts.transaction, opts.simulationResult)
+    .build();
+  preparedTx.sign(relayerKeypair as StellarSdk.Keypair);
+  return submitToRelayQuorum(preparedTx);
 }

@@ -651,6 +651,69 @@ export const batch_partial_failure_total = new Counter({
 });
 
 // ============================================
+// COST-BASED RATE LIMITING METRICS (#525)
+// ============================================
+
+export const paymentOpsPerMinute = new Histogram({
+  name: "zkvote_payment_ops_per_minute",
+  help: "Histogram of payment operations per minute per IP",
+  buckets: [1, 5, 10, 25, 50, 100],
+  registers: [register],
+});
+
+export const costRateLimitExceeded = new Counter({
+  name: "zkvote_cost_rate_limit_exceeded_total",
+  help: "Total cost-based rate limit violations",
+  labelNames: ["limiter", "cost"] as const,
+  registers: [register],
+});
+
+// ============================================
+// BACKUP ENCRYPTION METRICS (#524)
+// ============================================
+
+export const backupAge = new Gauge({
+  name: "zkvote_backup_age_seconds",
+  help: "Age of the most recent backup in seconds",
+  registers: [register],
+});
+
+export const backupTamperDetected = new Counter({
+  name: "zkvote_backup_tamper_detected_total",
+  help: "Total number of tampered backup restore attempts detected",
+  labelNames: ["keyId"] as const,
+  registers: [register],
+});
+
+export const backupRestoreSuccess = new Counter({
+  name: "zkvote_backup_restore_success_total",
+  help: "Total successful backup restore operations",
+  labelNames: ["keyId"] as const,
+  registers: [register],
+});
+
+export const backupRestoreFailed = new Counter({
+  name: "zkvote_backup_restore_failed_total",
+  help: "Total failed backup restore attempts",
+  labelNames: ["reason"] as const,
+  registers: [register],
+});
+
+export const backupEncryptionDuration = new Histogram({
+  name: "zkvote_backup_encryption_duration_seconds",
+  help: "Backup encryption operation duration in seconds",
+  buckets: [0.1, 0.5, 1, 2.5, 5, 10, 30, 60],
+  registers: [register],
+});
+
+export const backupDecryptionDuration = new Histogram({
+  name: "zkvote_backup_decryption_duration_seconds",
+  help: "Backup decryption operation duration in seconds",
+  buckets: [0.1, 0.5, 1, 2.5, 5, 10, 30, 60],
+  registers: [register],
+});
+
+// ============================================
 // DAO END-TO-END RECONCILIATION METRICS (#577)
 // ============================================
 

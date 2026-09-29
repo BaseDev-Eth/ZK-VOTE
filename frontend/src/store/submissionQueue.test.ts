@@ -32,7 +32,6 @@ function makePayload(nullifier = "abc123"): VotePayload {
     root: "deadbeef",
     proof: { a: "aa", b: "bb", c: "cc" },
     timestamp: 1000,
-    voterPublicKey: "GDTEST...",
   };
 }
 
@@ -423,22 +422,28 @@ describe("classifyError", () => {
     ).toMatchObject({ kind: "conflict" });
   });
 
-  it("classifies 'already voted' message as conflict regardless of status", () => {
+  it("does not classify message text alone as conflict", () => {
     expect(classifyError(200, undefined, "already voted on this")).toMatchObject(
-      { kind: "conflict" },
+      { kind: "retryable" },
     );
   });
 
-  it("classifies nullifier message as conflict", () => {
+  it("does not treat nullifier message text as conflict without a code", () => {
     expect(
       classifyError(400, undefined, "nullifier already used"),
+    ).toMatchObject({ kind: "permanent" });
+  });
+
+  it("classifies NULLIFIER_ALREADY_USED code as conflict", () => {
+    expect(
+      classifyError(409, "NULLIFIER_ALREADY_USED", "rejected"),
     ).toMatchObject({ kind: "conflict" });
   });
 
-  it("classifies UnreachableCodeReached as conflict", () => {
+  it("classifies UnreachableCodeReached message as retryable when status is 500", () => {
     expect(
       classifyError(500, undefined, "UnreachableCodeReached"),
-    ).toMatchObject({ kind: "conflict" });
+    ).toMatchObject({ kind: "retryable" });
   });
 
   it("classifies undefined status as retryable", () => {

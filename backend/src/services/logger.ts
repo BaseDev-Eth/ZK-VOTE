@@ -290,9 +290,11 @@ export function generateRequestId(): string {
 }
 
 export function hashIp(ip: string | undefined): string {
+  // Salt prevents rainbow-table recovery of IPv4 from truncated SHA-256 (#644).
+  const salt = process.env.IP_HASH_SALT || "";
   return crypto
     .createHash("sha256")
-    .update(ip || "")
+    .update(`${salt}|${ip || ""}`)
     .digest("hex")
     .slice(0, 12);
 }

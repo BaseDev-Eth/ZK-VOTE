@@ -97,12 +97,15 @@ export class KmsSigner implements StellarSigner {
   }
 
   async signHash(hash: Buffer): Promise<Buffer> {
-    logger.info("kms_sign_request", {
+    logger.error("kms_sign_not_implemented", {
       keyId: this.keyId,
       region: this.region,
       hashLength: hash.length,
     });
-    return Buffer.alloc(64);
+    throw new Error(
+      `KMS signing not implemented: integrate with AWS KMS SDK for key ${this.keyId} in ${this.region}. ` +
+      `Refusing to return dummy signature.`
+    );
   }
 }
 
@@ -132,11 +135,14 @@ export class HsmSigner implements StellarSigner {
   }
 
   async signHash(hash: Buffer): Promise<Buffer> {
-    logger.info("hsm_pkcs11_sign_request", {
+    logger.error("hsm_sign_not_implemented", {
       slotId: this.slotId,
       hashLength: hash.length,
     });
-    return Buffer.alloc(64);
+    throw new Error(
+      `HSM PKCS#11 signing not implemented: integrate with PKCS#11 module for slot ${this.slotId}. ` +
+      `Refusing to return dummy signature.`
+    );
   }
 }
 
@@ -811,8 +817,10 @@ export class RelayerKeyManager {
     publicKey: string,
     friendbotUrl?: string,
   ): Promise<{ success: boolean; message: string }> {
+    // SECURITY: Ignore user-supplied friendbotUrl to prevent SSRF.
+    // An attacker could pass http://169.254.169.254/... to exfiltrate
+    // cloud metadata via the error response. Only use server-configured URLs.
     const url =
-      friendbotUrl ||
       config.friendbotUrl ||
       "https://friendbot-futurenet.stellar.org";
 
@@ -839,10 +847,16 @@ export class RelayerKeyManager {
         logger.info("friendbot_funding_success", { publicKey });
         return { success: true, message: `Successfully funded ${publicKey}` };
       } else {
-        const text = await response.text();
+        // Do not echo the response body — it may contain sensitive
+        // information if the URL was misconfigured or pointed at an
+        // internal service.
+        logger.warn("friendbot_funding_failed", {
+          publicKey,
+          status: response.status,
+        });
         return {
           success: false,
-          message: `Friendbot returned status ${response.status}: ${text}`,
+          message: `Friendbot returned status ${response.status}`,
         };
       }
     } catch (err) {

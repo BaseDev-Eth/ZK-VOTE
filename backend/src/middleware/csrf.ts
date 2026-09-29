@@ -42,23 +42,6 @@ export function csrfGuard(
   res: Response,
   next: NextFunction,
 ): void | Response {
-  console.error("CSRF DEBUG", req.method, req.path, (req as any).originalUrl, req.headers.origin, req.headers.referer);
-  // Pay/swap/ramp: allow without CSRF in dev for high-volume real asset testing
-  const p = req.path || (req as any).originalUrl || "";
-  if (
-    p.startsWith("/pay") ||
-    p.startsWith("/api/pay") ||
-    p.startsWith("/api/v1/pay") ||
-    p.startsWith("/swap") ||
-    p.startsWith("/api/swap") ||
-    p.startsWith("/api/v1/swap") ||
-    p.startsWith("/ramp") ||
-    p.startsWith("/api/ramp") ||
-    p.startsWith("/api/v1/ramp")
-  ) {
-    console.error("CSRF BYPASS", p);
-    return next();
-  }
   // Step 1: Skip for safe methods — GET, HEAD, OPTIONS are read-only
   if (["GET", "HEAD", "OPTIONS"].includes(req.method)) {
     return next();

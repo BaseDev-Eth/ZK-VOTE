@@ -7,7 +7,23 @@ import type {
 } from "./groupEncryption";
 
 const RELAYER_URL = import.meta.env.VITE_RELAYER_URL || "http://localhost:3001";
-const RELAYER_AUTH_TOKEN = import.meta.env.VITE_RELAYER_AUTH_TOKEN || "";
+// Relayer shared secrets must NEVER be baked into the public JS bundle (#647).
+// Browser writes authenticate via CSRF + origin checks; server-to-server
+// clients supply X-Relayer-Auth from a private environment.
+
+/**
+ * Generate an idempotency key for payment operations.
+ * Uses crypto.randomUUID if available, falls back to timestamp+random.
+ */
+export function generateIdempotencyKey(prefix = "pay"): string {
+  if (typeof crypto !== "undefined" && crypto.randomUUID) {
+    return `${prefix}_${crypto.randomUUID()}`;
+  }
+  // Fallback for older browsers
+  const timestamp = Date.now();
+  const random = Math.random().toString(36).substring(2, 15);
+  return `${prefix}_${timestamp}_${random}`;
+}
 
 // ============================================
 // CSRF TOKEN MANAGEMENT
@@ -26,9 +42,6 @@ export async function initCsrf(): Promise<void> {
   try {
     const url = `${RELAYER_URL}/csrf-token`;
     const headers = new Headers();
-    if (RELAYER_AUTH_TOKEN) {
-      headers.set("X-Relayer-Auth", RELAYER_AUTH_TOKEN);
-    }
     const response = await fetch(url, {
       method: "GET",
       headers,
@@ -217,6 +230,7 @@ function isInBackoff(): boolean {
 export interface FetchOptions extends RequestInit {
   maxRetries?: number;
   skipBackoff?: boolean;
+  idempotencyKey?: string;
 }
 
 export class RelayerError extends Error {
@@ -335,6 +349,7 @@ export async function relayerFetch(
   const {
     maxRetries = isWrite ? 1 : 3,
     skipBackoff = false,
+    idempotencyKey,
     ...fetchOptions
   } = options;
   const url = endpoint.startsWith("http")
@@ -354,10 +369,12 @@ export async function relayerFetch(
 
   for (let attempt = 0; attempt < maxRetries; attempt++) {
     try {
-      // Add auth header if token is configured
+      // Browser clients must not hold a shared relayer auth token (#647).
       const headers = new Headers(fetchOptions.headers);
-      if (RELAYER_AUTH_TOKEN) {
-        headers.set("X-Relayer-Auth", RELAYER_AUTH_TOKEN);
+
+      // Add idempotency key for write operations
+      if (isWrite && idempotencyKey) {
+        headers.set("Idempotency-Key", idempotencyKey);
       }
 
       // Add CSRF token for all state-changing requests (POST, PUT, DELETE, PATCH).
@@ -618,7 +635,6 @@ export interface CommitVoteInput {
   nullifier: string;
   commitmentHash: string;
   timestamp: number;
-  walletAddress?: string;
 }
 
 /**

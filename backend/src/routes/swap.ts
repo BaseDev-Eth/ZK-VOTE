@@ -21,7 +21,7 @@ router.get("/swap/quote", queryLimiter, async (req, res) => {
   }
 });
 
-router.post("/swap/submit", csrfOriginGuard, bodyLimit("5kb"), async (req, res) => {
+router.post("/swap/submit", masterKeyGuard, csrfOriginGuard, bodyLimit("5kb"), async (req, res) => {
   try {
     const parsed = swapSubmitRequestSchema.safeParse(req.body);
     if (!parsed.success) {

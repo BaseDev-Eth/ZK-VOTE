@@ -28,6 +28,12 @@ jobs:
         run: cargo clippy --workspace --all-targets -- -D warnings
       - name: Build WASM
         run: cargo build --target wasm32v1-none --release
+      - name: Install Cosign
+        uses: sigstore/cosign-installer@v3.8.0
+      - name: Sigstore Cosign WASM verification
+        run: |
+          bash scripts/sign-wasm.sh target/wasm32v1-none/release
+          bash scripts/deploy/verify-wasm-signature.sh target/wasm32v1-none/release/dao_registry.wasm
       - name: Run unit tests (workspace, excluding integration)
         run: cargo test --workspace --exclude zkvote-integration-tests
       - name: Run integration tests (explicit, #575)

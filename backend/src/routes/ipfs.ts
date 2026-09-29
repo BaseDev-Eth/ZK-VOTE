@@ -35,7 +35,7 @@ import {
   enqueueDegradedWrite,
   drainIpfsPinQueue,
 } from "../services/service-health.js";
-import { detectMimeType } from "../utils/magic-bytes.js";
+import { detectMimeType, validationLock } from "../utils/magic-bytes.js";
 
 const router = Router();
 
@@ -436,23 +436,32 @@ router.post(
         (req as any).auth?.sub ??
         "authenticated";
 
-      const processed = await processImageUpload(req.file);
+      const initialHash = createHash("sha256").update(req.file.buffer).digest("hex");
 
-      log("info", "ipfs_upload_image", {
-        filename: req.file.originalname,
-        originalSize: req.file.size,
-        size: processed.buffer.length,
-        mimetype: processed.mimeType,
-        width: processed.width,
-        height: processed.height,
-        hash: processed.hash,
-        uploader,
-      });
+      const { processed, result } = await validationLock.acquire(
+        initialHash,
+        async () => {
+          const p = await processImageUpload(req.file!);
 
-      const result = await ipfsService.pinFile(
-        processed.buffer,
-        req.file.originalname,
-        processed.mimeType,
+          log("info", "ipfs_upload_image", {
+            filename: req.file!.originalname,
+            originalSize: req.file!.size,
+            size: p.buffer.length,
+            mimetype: p.mimeType,
+            width: p.width,
+            height: p.height,
+            hash: p.hash,
+            uploader,
+          });
+
+          const r = await ipfsService.pinFile(
+            p.buffer,
+            req.file!.originalname,
+            p.mimeType,
+          );
+
+          return { processed: p, result: r };
+        },
       );
 
       log("info", "ipfs_upload_success", {

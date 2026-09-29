@@ -82,6 +82,21 @@ template VoteV2(levels) {
     validChoice.in[0] <== voteChoice;
     validChoice.in[1] <== numCandidates;
     validChoice.out === 1;
+
+    // 6. Bind proof to relayer address (anti-front-running)
+    // This constraint ensures relayerAddress participates in the proof computation,
+    // preventing proof reuse by different relayers. The contract MUST verify that
+    // env.invoker() matches the relayerAddress public input for front-running protection.
+    component relayerHasher = Poseidon(6);
+    relayerHasher.inputs[0] <== secret;
+    relayerHasher.inputs[1] <== daoId;
+    relayerHasher.inputs[2] <== proposalId;
+    relayerHasher.inputs[3] <== chainId;
+    relayerHasher.inputs[4] <== nonce;
+    relayerHasher.inputs[5] <== relayerAddress;
+    signal relayerBinding;
+    relayerBinding <== relayerHasher.out;
+    // relayerBinding is constrained but not public to maintain voter privacy.
 }
 
 // Default tree depth of 18 (supports ~262K members)

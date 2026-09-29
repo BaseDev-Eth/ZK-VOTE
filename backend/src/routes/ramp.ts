@@ -1,11 +1,11 @@
 // @ts-nocheck
 import { Router } from "express";
 import { sep6Deposit, sep6Withdraw } from "../services/anchor.js";
-import { queryLimiter, csrfOriginGuard } from "../middleware/index.js";
+import { queryLimiter, csrfOriginGuard, masterKeyGuard } from "../middleware/index.js";
 
 const router = Router();
 
-router.get("/ramp/deposit", queryLimiter, async (req, res) => {
+router.get("/ramp/deposit", masterKeyGuard, queryLimiter, async (req, res) => {
   try {
     const { asset, account, amount } = req.query as any;
     if (!asset || !account || !amount) return res.status(400).json({ error: "asset, account, amount required" });
@@ -16,7 +16,7 @@ router.get("/ramp/deposit", queryLimiter, async (req, res) => {
   }
 });
 
-router.get("/ramp/withdraw", csrfOriginGuard, queryLimiter, async (req, res) => {
+router.get("/ramp/withdraw", masterKeyGuard, csrfOriginGuard, queryLimiter, async (req, res) => {
   try {
     const { asset, account, amount, dest } = req.query as any;
     if (!asset || !account || !amount) return res.status(400).json({ error: "asset, account, amount required" });

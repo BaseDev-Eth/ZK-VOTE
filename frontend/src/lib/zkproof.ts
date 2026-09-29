@@ -240,6 +240,7 @@ export interface VersionedVK {
   hash: string;
   fetchedAt: number;
   numPublicSignals?: number;
+  vkVersion?: number; // CRITICAL (#660): Track VK version from backend
 }
 
 export class VKMismatchError extends Error {
@@ -293,9 +294,25 @@ function loadVKFromStorage(
     const raw = localStorage.getItem(key);
     if (!raw) return null;
     const parsed = JSON.parse(raw) as VersionedVK;
+
+    // CRITICAL (#660): Validate VK integrity and version binding
+    if (!parsed.hash) {
+      console.warn(`[VK] Loaded VK from localStorage missing integrity hash for ${circuitId} v${version}`);
+      return null;
+    }
+    if (typeof parsed.version !== 'number' || parsed.version !== version) {
+      console.warn(`[VK] Version mismatch in localStorage for ${circuitId}: expected v${version}, got v${parsed.version}`);
+      return null;
+    }
+    if (typeof parsed.circuitId !== 'string' || parsed.circuitId !== circuitId) {
+      console.warn(`[VK] Circuit ID mismatch in localStorage: expected ${circuitId}, got ${parsed.circuitId}`);
+      return null;
+    }
+
     vkMemoryCache.set(vkCacheKey(circuitId, version), parsed);
     return parsed;
-  } catch {
+  } catch (e) {
+    console.warn(`[VK] Failed to load VK from localStorage for ${circuitId} v${version}:`, e);
     return null;
   }
 }
@@ -340,9 +357,11 @@ export async function fetchVersionedVK(
   }
 
   const data = await res.json();
-  // Backend returns { vk, version, hash, numPublicSignals } or { verificationKey }
+  // Backend returns { vk, version, hash, numPublicSignals, vkVersion } or { verificationKey }
   const vk = data.vk ?? data.verificationKey ?? data;
   const hash: string = data.hash ?? data.vkHash ?? (await computeVKHash(vk));
+
+  // CRITICAL (#660): Bind VK to the backend version for integrity verification
   const entry: VersionedVK = {
     circuitId,
     version: data.version ?? version,
@@ -350,6 +369,7 @@ export async function fetchVersionedVK(
     hash,
     fetchedAt: Date.now(),
     numPublicSignals: data.numPublicSignals,
+    vkVersion: data.vkVersion ?? data.version, // Store backend-provided VK version
   };
 
   // Detect stale if backend reports a newer version than requested
