@@ -74,9 +74,16 @@ export function createCorsOptions(
   const origins = getAllowedOrigins(allowed);
 
   // Validate origins before creating options
+  // Even in test mode, validate CORS origins to prevent test-mode bypass (#655)
+  const isProduction = process.env.NODE_ENV === "production";
+  const isTestMode = process.env.RELAYER_TEST_MODE === "true";
+
+  if (isTestMode && isProduction) {
+    throw new Error("RELAYER_TEST_MODE=true is forbidden in production");
+  }
+
   validateCorsOrigins(origins);
 
-  const isProduction = process.env.NODE_ENV === "production";
   const allowAllCors = !isProduction && origins.includes("*");
 
   return {

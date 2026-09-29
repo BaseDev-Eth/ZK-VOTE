@@ -6,6 +6,20 @@ include "node_modules/circomlib/circuits/comparators.circom";
 // Spike prototype for DID/eSIM-style signed claims without linking the claim
 // to the voting membership commitment.
 //
+// ⚠️  CRITICAL SECURITY WARNING ⚠️
+// This circuit is INCOMPLETE and INSECURE for production use.
+// signedClaimHash and claimSalt are free private witnesses with NO cryptographic
+// verification. A prover can generate unlimited fake attributes by:
+//   1. Choosing arbitrary attributeValue (e.g., 10^9 to pass any threshold)
+//   2. Grinding claimSalt to produce unused attributeNullifiers
+//
+// REQUIRED FIX: Add ECDSA/EdDSA signature verification proving that:
+//   signedClaimHash = Hash(issuerId, attributeKey, attributeValue, ...)
+//   AND the issuer's signature over signedClaimHash is valid
+//
+// Without signature verification, this circuit provides NO security guarantees.
+// See circom-ecdsa or circom-eddsa libraries for signature verification templates.
+//
 // Public signals:
 // - issuerId: field hash of the DID/eSIM issuer.
 // - attributeKey: field hash for the disclosed attribute class.
@@ -29,6 +43,26 @@ template DidAttributeBinding() {
     signal input signedClaimHash;
     signal input attributeValue;
     signal input claimSalt;
+
+    // TODO: Add signature verification inputs:
+    // signal input issuerPubKey[2];      // ECDSA public key (x, y)
+    // signal input signature[2];          // ECDSA signature (r, s)
+    // signal input signedMessage;         // Message signed by issuer
+    //
+    // TODO: Verify signature:
+    // component sigVerifier = ECDSAVerify();
+    // sigVerifier.pubKey[0] <== issuerPubKey[0];
+    // sigVerifier.pubKey[1] <== issuerPubKey[1];
+    // sigVerifier.r <== signature[0];
+    // sigVerifier.s <== signature[1];
+    // sigVerifier.msghash <== signedClaimHash;
+    // sigVerifier.result === 1;
+    //
+    // TODO: Link issuerPubKey to issuerId:
+    // component issuerHasher = Poseidon(2);
+    // issuerHasher.inputs[0] <== issuerPubKey[0];
+    // issuerHasher.inputs[1] <== issuerPubKey[1];
+    // issuerId === issuerHasher.out;
 
     component nullifierHasher = Poseidon(4);
     nullifierHasher.inputs[0] <== issuerId;

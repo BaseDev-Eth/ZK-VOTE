@@ -1,6 +1,7 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { Button } from "./ui/Button";
 import { relayerFetch } from "../lib/api";
+import { isAllowedMessageOrigin } from "../lib/messageOrigin";
 
 type Asset = "XLM" | "USDC" | "EURC";
 
@@ -10,6 +11,34 @@ export default function SwapPanel() {
   const [amount, setAmount] = useState("10");
   const [quote, setQuote] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
+
+  useEffect(() => {
+    const handleMessage = (event: MessageEvent) => {
+      // Security: Strictly enforce origin check against allowlist (blocks evil.com)
+      if (!isAllowedMessageOrigin(event.origin)) {
+        console.warn("Dropped postMessage from untrusted origin:", event.origin);
+        return;
+      }
+
+      const data = event.data;
+      if (!data || typeof data !== "object") return;
+
+      if (data.type === "SET_SWAP" && data.payload) {
+        if (data.payload.from && ["XLM", "USDC", "EURC"].includes(data.payload.from)) {
+          setFrom(data.payload.from);
+        }
+        if (data.payload.to && ["XLM", "USDC", "EURC"].includes(data.payload.to)) {
+          setTo(data.payload.to);
+        }
+        if (typeof data.payload.amount === "string") {
+          setAmount(data.payload.amount);
+        }
+      }
+    };
+
+    window.addEventListener("message", handleMessage);
+    return () => window.removeEventListener("message", handleMessage);
+  }, []);
 
   const getQuote = async () => {
     setLoading(true);

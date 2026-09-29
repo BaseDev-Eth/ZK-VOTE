@@ -198,6 +198,16 @@ app.use((_req, res, next) => {
   next();
 });
 
+// CRITICAL (#661): Cross-origin isolation headers for timing-masking to be effective.
+// Timing masking in proof generation only works when the page is crossOriginIsolated,
+// which requires COOP + COEP headers from the server (dev/preview server has these
+// in vite.config.ts, but production must send them too).
+app.use((_req, res, next) => {
+  res.setHeader("Cross-Origin-Opener-Policy", "same-origin");
+  res.setHeader("Cross-Origin-Embedder-Policy", "require-corp");
+  next();
+});
+
 // Prevent caching of sensitive, non-static API responses. Kept scoped to the
 // routes that return per-user or per-vote data rather than applied globally,
 // since some routes (e.g. /api-docs, /ipfs/image/:cid) are fine to cache.

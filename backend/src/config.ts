@@ -111,6 +111,10 @@ const envSchema = z.object({
   DAO_REGISTRY_CONTRACT_ID: z.string().min(1).optional(),
   MEMBERSHIP_SBT_CONTRACT_ID: z.string().min(1).optional(),
   BRIDGE_CONTRACT_ID: z.string().min(1).optional(),
+  /** Path to bridge circuit verification_key.json used by POST /bridge/vote */
+  BRIDGE_VKEY_PATH: z.string().min(1).optional(),
+  /** Salt mixed into IP hashes so truncated SHA-256 is not rainbow-tableable */
+  IP_HASH_SALT: z.string().default(""),
   CIRCUIT_REGISTRY_CONTRACT_ID: z.string().min(1).optional(),
   REWARDS_CONTRACT_ID: z.string().min(1).optional(),
   TREASURY_CONTRACT_ID: z.string().min(1).optional(),
@@ -580,6 +584,8 @@ export const config = {
   daoRegistryContractId: process.env.DAO_REGISTRY_CONTRACT_ID,
   membershipSbtContractId: process.env.MEMBERSHIP_SBT_CONTRACT_ID,
   bridgeContractId: process.env.BRIDGE_CONTRACT_ID,
+  bridgeVkeyPath: validatedEnv.BRIDGE_VKEY_PATH,
+  ipHashSalt: validatedEnv.IP_HASH_SALT,
   circuitRegistryContractId: process.env.CIRCUIT_REGISTRY_CONTRACT_ID,
   rewardsContractId: process.env.REWARDS_CONTRACT_ID,
   treasuryContractId: validatedEnv.TREASURY_CONTRACT_ID,

@@ -89,4 +89,22 @@ template Vote(levels) {
     validChoice.in[0] <== voteChoice;
     validChoice.in[1] <== numCandidates;
     validChoice.out === 1;
+
+    // 5. Bind proof to relayer address (anti-front-running)
+    // NOTE: This constraint ensures relayerAddress is bound into the proof,
+    // but the contract MUST verify that msg.sender/env.invoker() matches
+    // the relayerAddress public input for this to provide front-running protection.
+    // Without contract-side validation, this binding is ineffective.
+    component relayerHasher = Poseidon(5);
+    relayerHasher.inputs[0] <== secret;
+    relayerHasher.inputs[1] <== daoId;
+    relayerHasher.inputs[2] <== proposalId;
+    relayerHasher.inputs[3] <== voteChoice;
+    relayerHasher.inputs[4] <== relayerAddress;
+    signal relayerBinding;
+    relayerBinding <== relayerHasher.out;
+    // The relayerBinding is computed and constrained (ensures relayerAddress
+    // participates in the proof) but not exposed as public output to maintain
+    // privacy. The contract should reject proofs where relayerAddress doesn't
+    // match the actual transaction sender.
 }

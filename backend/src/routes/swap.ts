@@ -1,7 +1,7 @@
 // @ts-nocheck
 import { Router } from "express";
 import { getQuote, executeSwap } from "../services/swap.js";
-import { queryLimiter, bodyLimit, csrfOriginGuard } from "../middleware/index.js";
+import { queryLimiter, bodyLimit, csrfOriginGuard, masterKeyGuard } from "../middleware/index.js";
 
 const router = Router();
 
@@ -16,7 +16,7 @@ router.get("/swap/quote", queryLimiter, async (req, res) => {
   }
 });
 
-router.post("/swap/submit", csrfOriginGuard, bodyLimit("5kb"), async (req, res) => {
+router.post("/swap/submit", masterKeyGuard, csrfOriginGuard, bodyLimit("5kb"), async (req, res) => {
   try {
     const { from, to, amount, destMin, destination } = req.body;
     const dest = destination || (await import("../services/stellar.js")).relayerKeypair.publicKey();

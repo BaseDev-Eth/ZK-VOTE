@@ -18,7 +18,7 @@
 #![no_std]
 use soroban_sdk::{
     contract, contracterror, contractimpl, contracttype, panic_with_error, symbol_short, Address,
-    Env, Symbol, U256,
+    Env, IntoVal, Symbol, U256,
 };
 
 const VOTING_CONTRACT: Symbol = symbol_short!("voting");
@@ -110,6 +110,12 @@ impl Bridge {
     /// Called by relayer after observing VoteForwarded event on EVM.
     /// The relayer passes the same parameters from the EVM event.
     ///
+    /// Cross-chain double-vote prevention: checks the **voting contract's**
+    /// nullifier state (not just the bridge's local map). Without this
+    /// cross-contract call a voter could cast natively on Soroban and then
+    /// replay the same nullifier through the EVM bridge — the bridge's
+    /// isolated storage would never see the native vote.
+    ///
     /// # Arguments
     /// * `dao_id` - DAO identifier
     /// * `proposal_id` - Proposal identifier
@@ -134,20 +140,39 @@ impl Bridge {
             panic_with_error!(&env, BridgeError::InvalidVoteChoice);
         }
 
-        // Check nullifier hasn't been used (cross-chain double-vote prevention)
+        // Check nullifier hasn't been used in the BRIDGE's own state
         let null_key = DataKey::Nullifier(dao_id, proposal_id, nullifier.clone());
         if env.storage().persistent().has(&null_key) {
             panic_with_error!(&env, BridgeError::NullifierAlreadyUsed);
         }
 
         // Verify voting contract is configured
-        let _: Address = env
+        let voting_addr: Address = env
             .storage()
             .instance()
             .get(&VOTING_CONTRACT)
             .unwrap_or_else(|| panic_with_error!(&env, BridgeError::VotingContractNotSet));
 
-        // Mark nullifier as used before recording vote
+        // CRITICAL: Check nullifier against the VOTING CONTRACT's state.
+        // The voting contract stores nullifiers in temporary/persistent
+        // storage keyed by (dao_id, proposal_id, nullifier). We call
+        // is_nullifier_used on the voting contract to prevent a voter
+        // who already cast natively from replaying via the bridge.
+        let already_used: bool = env.invoke_contract(
+            &voting_addr,
+            &Symbol::new(&env, "is_nullifier_used"),
+            soroban_sdk::vec![
+                &env,
+                dao_id.into_val(&env),
+                proposal_id.into_val(&env),
+                nullifier.clone().into_val(&env),
+            ],
+        );
+        if already_used {
+            panic_with_error!(&env, BridgeError::NullifierAlreadyUsed);
+        }
+
+        // Mark nullifier as used in bridge state before recording vote
         // This prevents re-entrancy attacks
         env.storage().persistent().set(&null_key, &true);
         Self::bump_persistent(&env, &null_key);

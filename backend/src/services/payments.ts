@@ -2,6 +2,7 @@
  * Payments Service — XLM / USDC / EURC (real assets, no mocks)
  * High-volume: MuxedAccount + 100 ops/tx + fee-bump + idempotency
  */
+import crypto from "node:crypto";
 import * as StellarSdk from "@stellar/stellar-sdk";
 import { config } from "../config.js";
 import { relayerKeypair } from "./stellar.js";
@@ -10,15 +11,14 @@ import { log } from "./logger.js";
 import { getDb } from "./db.js";
 
 const horizonServer = new (StellarSdk.Horizon as any).Server((config as any).horizonUrl || "https://horizon-testnet.stellar.org");
-console.error("PAYMENTS LOADED horizon", (horizonServer as any).serverURL?.href || (horizonServer as any).serverURL);
-log("info", "payments_loaded", { url: (horizonServer as any).serverURL?.href || (horizonServer as any).serverURL });
+log("info", "payments_loaded", {});
 
 export type PaymentAsset = "XLM" | "USDC" | "EURC";
 
 const ISSUERS: Record<PaymentAsset, string | null> = {
   XLM: null,
-  USDC: process.env.USDC_ISSUER || "GXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX",
-  EURC: process.env.EURC_ISSUER || "GXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX",
+  USDC: process.env.USDC_ISSUER || null,
+  EURC: process.env.EURC_ISSUER || null,
 };
 
 export function getAsset(code: PaymentAsset): StellarSdk.Asset {
@@ -49,8 +49,7 @@ export interface BatchResult {
 
 // Single payment (uses relayerKeypair as source, withSequenceLock for high volume) — via Horizon (classic, not Soroban)
 export async function sendPayment(op: PaymentOp): Promise<{ hash: string }> {
-  console.error("PAY via horizon", (horizonServer as any).serverURL?.href || (horizonServer as any).serverURL, "relayer", relayerKeypair.publicKey());
-  log("info", "payment_via_horizon", { url: (horizonServer as any).serverURL?.href || (horizonServer as any).serverURL || "horizon-testnet", relayer: relayerKeypair.publicKey() });
+  log("info", "payment_via_horizon", {});
   const asset = getAsset(op.asset);
   const dest = op.destination;
   const amount = op.amount;
@@ -77,7 +76,7 @@ export async function sendPayment(op: PaymentOp): Promise<{ hash: string }> {
 export async function sendBatch(ops: PaymentOp[]): Promise<BatchResult> {
   if (ops.length === 0) throw new Error("No ops");
   if (ops.length > 100) throw new Error("Batch max 100 ops");
-  const idempotencyKey = `batch_${Date.now()}_${ops.length}`;
+  const idempotencyKey = `batch_${Date.now()}_${crypto.randomUUID()}`;
   const db = getDb();
   try {
     db.prepare("INSERT OR IGNORE INTO payment_jobs (id, ops, created_at) VALUES (?,?,?)").run(idempotencyKey, JSON.stringify(ops), new Date().toISOString());
@@ -125,7 +124,6 @@ export async function quoteStrictSend(sendAsset: PaymentAsset, sendAmount: strin
     send_amount: sendAmount,
     destination_assets: `${destA.getCode()}:${destA.getIssuer()}` // for native, handled
   });
-  // Fallback: if Horizon not available, return 1:1
   try {
     const url = `${horizonUrl}/paths/strict-send?${params.toString()}`;
     const res = await fetch(url);
@@ -134,8 +132,9 @@ export async function quoteStrictSend(sendAsset: PaymentAsset, sendAmount: strin
       const r = j._embedded.records[0];
       return { destAmount: r.destination_amount, path: r.path };
     }
+    throw new Error("No path found for the requested swap");
   } catch (e) {
-    log("warn", "quote_fallback", { error: (e as Error).message });
+    log("error", "quote_failed", { error: (e as Error).message });
+    throw new Error(`Quote unavailable: ${(e as Error).message}`);
   }
-  return { destAmount: sendAmount, path: [] };
 }

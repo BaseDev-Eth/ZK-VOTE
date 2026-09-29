@@ -3,6 +3,7 @@ pragma circom 2.0.0;
 include "node_modules/circomlib/circuits/poseidon.circom";
 include "node_modules/circomlib/circuits/bitify.circom";
 include "node_modules/circomlib/circuits/comparators.circom";
+include "merkle_tree.circom";
 
 /*
  * Shielded UTXO Transfer Circuit (2-in-2-out Joinsplit)
@@ -102,16 +103,27 @@ template ShieldedTransfer(levels) {
     // 3. Verify input note nullifiers and commitments
     component noteInHasher[2];
     component nullifierHasher[2];
+    component merkleProof[2];
+    component pkHasher[2];
 
     for (var i = 0; i < 2; i++) {
         // Derive public key from spending key (Poseidon(spendingKey))
-        component pkHasher = Poseidon(1);
-        pkHasher.inputs[0] <== spendingKey[i];
+        pkHasher[i] = Poseidon(1);
+        pkHasher[i].inputs[0] <== spendingKey[i];
 
         noteInHasher[i] = NoteCommitment();
-        noteInHasher[i].pubKey <== pkHasher.out;
+        noteInHasher[i].pubKey <== pkHasher[i].out;
         noteInHasher[i].value <== valueIn[i];
         noteInHasher[i].salt <== saltIn[i];
+
+        // Verify input note exists in Merkle tree
+        merkleProof[i] = MerkleTreeInclusionProof(levels);
+        merkleProof[i].leaf <== noteInHasher[i].commitment;
+        for (var j = 0; j < levels; j++) {
+            merkleProof[i].pathElements[j] <== pathElementsIn[i][j];
+            merkleProof[i].pathIndices[j] <== pathIndicesIn[i][j];
+        }
+        root === merkleProof[i].root;
 
         nullifierHasher[i] = NullifierDerivation();
         nullifierHasher[i].spendingKey <== spendingKey[i];

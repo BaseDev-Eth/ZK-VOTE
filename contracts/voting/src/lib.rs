@@ -1458,21 +1458,22 @@ impl Voting {
         // - [CAP-0074](https://github.com/stellar/stellar-protocol/blob/master/core/cap-0074.md)
         // - Groth16 paper Section 3.2 - Verification algorithm
 
-        // If TranscriptRegistry is configured, require on-chain attestation
-        if let Some(transcript_registry) = env
+        // CRITICAL (#662): Transcript registry attestation is now REQUIRED.
+        // Fail open prevented by making transcript verification mandatory when registry exists.
+        let transcript_registry = env
             .storage()
             .instance()
             .get::<_, Address>(&TRANSCRIPT_REGISTRY)
-        {
-            let vk_hash = Self::hash_vk(&env, &vk);
-            let is_attested: bool = env.invoke_contract(
-                &transcript_registry,
-                &Symbol::new(&env, "is_vk_attested"),
-                soroban_sdk::vec![&env, vk_hash.into_val(&env)],
-            );
-            if !is_attested {
-                panic_with_error!(&env, VotingError::VkNotAttested);
-            }
+            .expect("Transcript registry not configured - cannot verify VK attestation");
+
+        let vk_hash = Self::hash_vk(&env, &vk);
+        let is_attested: bool = env.invoke_contract(
+            &transcript_registry,
+            &Symbol::new(&env, "is_vk_attested"),
+            soroban_sdk::vec![&env, vk_hash.into_val(&env)],
+        );
+        if !is_attested {
+            panic_with_error!(&env, VotingError::VkNotAttested);
         }
 
         // Bump VK version

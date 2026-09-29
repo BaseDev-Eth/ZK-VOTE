@@ -303,47 +303,8 @@ export default function VoteModal({
         timestamp: Date.now(),
       } as VotePayload & { redundantProof?: unknown };
 
-      // Sign the vote payload with the voter's Stellar keypair
-      let voterSignature: string | undefined;
-      try {
-        setProgress("Signing vote with your wallet...");
-        const { signVotePayload } = await import("../services/freighter");
-        const { getFreighterNetworkDetails } =
-          await import("../services/freighter");
-        const networkDetails = await getFreighterNetworkDetails();
-        const networkPassphrase =
-          networkDetails?.networkPassphrase ||
-          "Public Global Stellar Network ; September 2015";
-
-        const payloadToSign = JSON.stringify({
-          daoId: Number(daoId),
-          proposalId: Number(proposalId),
-          choice,
-          nullifier: toHexBE(nullifier),
-          root: toHexBE(root),
-          timestamp: Date.now(),
-        });
-        voterSignature = await signVotePayload(
-          payloadToSign,
-          publicKey,
-          networkPassphrase,
-        );
-
-        if (import.meta.env.DEV) {
-          console.log("Vote payload signed:", {
-            signature: voterSignature.slice(0, 16) + "...",
-          });
-        }
-      } catch (err) {
-        console.warn("Failed to sign vote payload:", err);
-        // Continue without signature - backend will still accept it with relayer auth token
-      }
-
-      votePayload = {
-        ...votePayload,
-        voterPublicKey: publicKey,
-        voterSignature,
-      };
+      // Do not attach voterPublicKey / voterSignature — that links the wallet
+      // to the nullifier and ballot in transit and in localStorage (#644).
 
       // Step 7: Deduplication check — if this nullifier is already in the
       // queue as submitted or conflict, surface that to the user.
@@ -366,7 +327,7 @@ export default function VoteModal({
         }
       }
 
-      // Optimistic update — show success UI before the network round-trip
+      // Optimistic tally preview — reverted if submission does not land
       const revertOptimisticUpdate = setOptimisticVote(
         daoId,
         proposalId,
@@ -386,43 +347,55 @@ export default function VoteModal({
         return;
       }
 
-      // Step 9: Attempt immediate submission via queue processor
+      // Step 9: Await submission — only show success when the relay accepts (#646)
       setProgress("Submitting anonymous vote through relay...");
-      setStep("success");
+      setStep("submitting");
+
+      await processEntry(entry);
+
+      const finalEntry =
+        submissionQueue.getState().entries[votePayload.nullifier];
+
+      if (finalEntry?.status === "submitted") {
+        if (finalEntry.txHash) {
+          addReceipt({
+            txHash: finalEntry.txHash,
+            nullifier: votePayload.nullifier,
+            timestamp: Date.now(),
+            daoId: Number(daoId),
+            proposalId: Number(proposalId),
+          });
+        }
+        clearPendingVote(daoId, proposalId);
+        setStep("success");
+        onComplete();
+        return;
+      }
+
+      if (finalEntry?.status === "conflict") {
+        revertOptimisticUpdate();
+        setStep("error");
+        setError(
+          finalEntry.conflictDetail ||
+            "You have already voted on this proposal.",
+        );
+        return;
+      }
+
+      if (finalEntry?.status === "failed") {
+        revertOptimisticUpdate();
+        setStep("error");
+        setError(
+          finalEntry.lastError ||
+            "Vote submission failed. Please try again.",
+        );
+        return;
+      }
+
+      // pending / retryable — keep optimistic preview, show queued UI
+      setIsOfflineQueued(false);
+      setStep("queued");
       onComplete();
-
-      // Submit in background via the queue processor
-      processEntry(entry)
-        .then(() => {
-          // Read final state from the queue
-          const finalEntry = submissionQueue.getState().entries[votePayload.nullifier];
-          if (!finalEntry) return;
-
-          if (finalEntry.status === "submitted") {
-            if (finalEntry.txHash) {
-              addReceipt({
-                txHash: finalEntry.txHash,
-                nullifier: votePayload.nullifier,
-                timestamp: Date.now(),
-                daoId: Number(daoId),
-                proposalId: Number(proposalId),
-              });
-            }
-            clearPendingVote(daoId, proposalId);
-          } else if (finalEntry.status === "conflict") {
-            // Conflict: this nullifier was already used.
-            // The SubmissionQueueBanner will surface the conflict notification.
-            revertOptimisticUpdate();
-          } else if (finalEntry.status === "failed") {
-            // Permanent failure
-            revertOptimisticUpdate();
-          }
-          // For "pending" (retryable): leave optimistic update in place,
-          // the queue processor will retry automatically.
-        })
-        .catch(() => {
-          // processEntry never throws — errors are recorded in the queue entry
-        });
     } catch (err) {
       setStep("error");
       let errorMsg =

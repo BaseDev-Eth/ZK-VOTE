@@ -80,6 +80,23 @@ export async function processEntry(entry: QueueEntry): Promise<void> {
     }
 
     const result = await response.json().catch(() => ({}));
+
+    // Backend may return 202 with { success: false, status: "PENDING" } while
+    // the vote is still in the relay queue — that is not a submitted ballot.
+    if (
+      response.status === 202 ||
+      result?.status === "PENDING" ||
+      result?.success === false
+    ) {
+      submissionQueue.markRetryable(
+        entry.id,
+        typeof result?.error === "string"
+          ? result.error
+          : "Vote accepted but still pending confirmation",
+      );
+      return;
+    }
+
     const txHash: string | null =
       typeof result.txHash === "string" ? result.txHash : null;
     submissionQueue.markSubmitted(entry.id, txHash);

@@ -132,6 +132,7 @@ export async function relayVote(event: EVMVoteEvent): Promise<RelayResult> {
       StellarSdk.nativeToScVal(event.voteChoice === 1, { type: "bool" }),
       scNullifier,
       scVoteRoot,
+      StellarSdk.Address.fromString(deps().relayerKeypair.publicKey()).toScVal(),
     ];
 
     const operation = contract.call("relay_vote", ...args);

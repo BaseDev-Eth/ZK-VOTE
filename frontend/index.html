@@ -8,16 +8,32 @@
     <meta name="description" content="Zero-knowledge governance for decentralized organizations on Stellar. Vote anonymously with cryptographic proofs." />
     <title>ZKVote - Anonymous Governance</title>
 
-    <!-- Anti-clickjacking Frame Busting Fallback -->
+    <!-- Anti-clickjacking Frame Busting Fallback with Soroswap Allowlist -->
     <script>
       if (window.top !== window.self) {
+        var allowedAncestors = [
+          "https://app.soroswap.finance",
+          "https://api.soroswap.finance",
+          "https://soroswap.finance"
+        ];
+        var isAllowed = false;
         try {
-          if (window.top) {
-            window.top.location = window.self.location;
+          if (document.referrer) {
+            var refOrigin = new URL(document.referrer).origin;
+            if (allowedAncestors.indexOf(refOrigin) !== -1 || refOrigin === window.location.origin) {
+              isAllowed = true;
+            }
           }
-        } catch {
-          document.documentElement.innerHTML = "";
-          document.documentElement.innerText = "Clickjacking protection: framing is disabled.";
+        } catch (e) {}
+        if (!isAllowed) {
+          try {
+            if (window.top) {
+              window.top.location = window.self.location;
+            }
+          } catch {
+            document.documentElement.innerHTML = "";
+            document.documentElement.innerText = "Clickjacking protection: framing is disabled.";
+          }
         }
       }
     </script>

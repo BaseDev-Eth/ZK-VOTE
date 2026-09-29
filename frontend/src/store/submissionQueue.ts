@@ -48,6 +48,10 @@ export type SubmissionStatus =
 export interface VotePayload {
   daoId: number;
   proposalId: number;
+  /**
+   * Ballot choice is a public circuit signal (needed by the voting contract).
+   * It must never be paired with a wallet identity in this payload (#644).
+   */
   choice: boolean;
   /** Big-endian hex nullifier (public signal, safe to persist) */
   nullifier: string;
@@ -60,10 +64,6 @@ export interface VotePayload {
   };
   /** Unix ms timestamp of when the proof was generated */
   timestamp: number;
-  /** Optional voter public key for relayer auth */
-  voterPublicKey?: string;
-  /** Optional signature over the payload */
-  voterSignature?: string;
 }
 
 /** A single entry in the queue. */
@@ -223,12 +223,10 @@ export function classifyError(
   errorCode: string | undefined,
   message: string,
 ): ErrorClassification {
-  // Conflict codes
+  // Conflict: structured codes only — never string-match error text (#646)
   if (
     errorCode === "VOTE_ALREADY_CAST" ||
-    message.toLowerCase().includes("already voted") ||
-    message.toLowerCase().includes("nullifier") ||
-    message.toLowerCase().includes("unreachablecodereached")
+    errorCode === "NULLIFIER_ALREADY_USED"
   ) {
     return { kind: "conflict", message };
   }

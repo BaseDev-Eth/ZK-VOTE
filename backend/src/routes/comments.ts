@@ -22,6 +22,7 @@ import {
 import { verifyMembership } from "../services/sync.js";
 import {
   authGuard,
+  anonymousGuard,
   auditLog,
   commentLimiter,
   queryLimiter,
@@ -142,7 +143,7 @@ router.get(
 router.post(
   "/comment/anonymous",
   bodyLimit("10kb"),
-  authGuard,
+  anonymousGuard,
   auditLog("comment_anonymous_relay"),
   commentLimiter,
   validateBody(anonymousCommentSchema),

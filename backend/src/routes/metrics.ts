@@ -5,6 +5,9 @@
  */
 
 import { Router, Request, Response } from "express";
+import { extractAuthToken } from "../middleware/auth.js";
+import { config } from "../config.js";
+import { timingSafeEqual } from "node:crypto";
 import { register } from "../services/metrics.js";
 import {
   dbConnectionsActive,
@@ -30,7 +33,19 @@ const router = Router();
  * GET /metrics
  * Prometheus-compatible metrics endpoint
  */
-router.get("/metrics", async (_req: Request, res: Response) => {
+router.get("/metrics", async (req: Request, res: Response) => {
+  // Auth-gate: metrics can reveal operational details (queue depths,
+  // error rates, sequence numbers). Require the relayer auth token.
+  const token = extractAuthToken(req);
+  const expected = config.relayerAuthToken;
+  if (!token || !expected) {
+    return res.status(401).json({ error: "Unauthorized" });
+  }
+  const bufA = Buffer.from(token);
+  const bufB = Buffer.from(expected);
+  if (bufA.length !== bufB.length || !timingSafeEqual(bufA, bufB)) {
+    return res.status(401).json({ error: "Unauthorized" });
+  }
   try {
     // Update RPC pool gauges before collecting
     const poolMetrics = rpcPoolManager.getMetrics();

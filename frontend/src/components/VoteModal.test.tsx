@@ -83,6 +83,60 @@ vi.mock("../lib/zk", () => ({
   storeZKCredentials: vi.fn(),
 }));
 
+vi.mock("../lib/circuitDepth", () => ({
+  resolveCircuitUrls: vi.fn().mockReturnValue({
+    wasmUrl: "/circuits/vote.wasm",
+    zkeyUrl: "/circuits/vote_final.zkey",
+  }),
+}));
+
+vi.mock("../queries/proposalQueries", () => ({
+  useOptimisticVote: () => ({
+    setOptimisticVote: vi.fn(() => vi.fn()),
+    clearPendingVote: vi.fn(),
+  }),
+}));
+
+vi.mock("../hooks/useReceipts", () => ({
+  useReceipts: () => ({ addReceipt: vi.fn() }),
+}));
+
+const mockProcessEntry = vi.fn();
+vi.mock("../lib/queueProcessor", () => ({
+  processEntry: (...args: unknown[]) => mockProcessEntry(...args),
+}));
+
+const queueEntries: Record<string, { status: string; txHash: string | null; conflictDetail: string | null; lastError: string | null }> = {};
+
+vi.mock("../store/submissionQueue", async () => {
+  const actual = await vi.importActual<typeof import("../store/submissionQueue")>(
+    "../store/submissionQueue",
+  );
+  return {
+    ...actual,
+    submissionQueue: {
+      ...actual.submissionQueue,
+      enqueue: vi.fn((payload: { nullifier: string }) => {
+        const entry = {
+          id: payload.nullifier,
+          payload,
+          status: "pending" as const,
+          attempts: 0,
+          enqueuedAt: Date.now(),
+          lastAttemptAt: null,
+          retryAfter: null,
+          lastError: null,
+          conflictDetail: null,
+          txHash: null,
+        };
+        queueEntries[payload.nullifier] = entry;
+        return entry;
+      }),
+      getState: vi.fn(() => ({ entries: queueEntries })),
+    },
+  };
+});
+
 // Mock fetch for relay submission
 global.fetch = vi.fn();
 
@@ -101,6 +155,16 @@ describe("VoteModal", () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    Object.keys(queueEntries).forEach((k) => delete queueEntries[k]);
+    mockProcessEntry.mockImplementation(async (entry: { id: string }) => {
+      queueEntries[entry.id] = {
+        ...queueEntries[entry.id],
+        status: "submitted",
+        txHash: "abc123",
+        conflictDetail: null,
+        lastError: null,
+      };
+    });
     (global.fetch as ReturnType<typeof vi.fn>).mockResolvedValue({
       ok: true,
       json: () => Promise.resolve({ txHash: "abc123" }),
@@ -292,33 +356,34 @@ describe("VoteModal error handling", () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    Object.keys(queueEntries).forEach((k) => delete queueEntries[k]);
+    mockProcessEntry.mockImplementation(async (entry: { id: string }) => {
+      queueEntries[entry.id] = {
+        ...queueEntries[entry.id],
+        status: "failed",
+        txHash: null,
+        conflictDetail: null,
+        lastError: "Network error",
+      };
+    });
   });
 
-  it("shows optimistic vote submission step when vote is cast", async () => {
-    (global.fetch as ReturnType<typeof vi.fn>).mockResolvedValue({
-      ok: false,
-      json: () => Promise.resolve({ error: "Network error" }),
-    });
-
+  it("shows error when relay rejects the vote", async () => {
     renderWithQueryClient(<VoteModal {...defaultProps} />);
 
     fireEvent.click(screen.getByText("Vote Yes"));
 
-    expect(await screen.findByText("Vote Submitted!")).toBeInTheDocument();
+    expect(await screen.findByText("Error")).toBeInTheDocument();
+    expect(screen.getByText(/Network error/i)).toBeInTheDocument();
   });
 
   it("provides Close button in error state", async () => {
-    (global.fetch as ReturnType<typeof vi.fn>).mockResolvedValue({
-      ok: false,
-      json: () => Promise.resolve({ error: "Some error" }),
-    });
-
     renderWithQueryClient(<VoteModal {...defaultProps} />);
 
     fireEvent.click(screen.getByText("Vote Yes"));
 
-    // Optimistic UI immediately transitions to success step
-    expect(await screen.findByText("Vote Submitted!")).toBeInTheDocument();
+    expect(await screen.findByText("Error")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /close|done/i })).toBeInTheDocument();
   });
 });
 
@@ -337,6 +402,16 @@ describe("VoteModal success state", () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    Object.keys(queueEntries).forEach((k) => delete queueEntries[k]);
+    mockProcessEntry.mockImplementation(async (entry: { id: string }) => {
+      queueEntries[entry.id] = {
+        ...queueEntries[entry.id],
+        status: "submitted",
+        txHash: "abc123",
+        conflictDetail: null,
+        lastError: null,
+      };
+    });
     (global.fetch as ReturnType<typeof vi.fn>).mockResolvedValue({
       ok: true,
       json: () => Promise.resolve({ txHash: "abc123" }),
@@ -352,7 +427,7 @@ describe("VoteModal success state", () => {
 
     fireEvent.click(screen.getByText("Vote Yes"));
 
-    // Should eventually show success
+    // Should eventually show success only after processEntry resolves
     expect(await screen.findByText("Vote Submitted!")).toBeInTheDocument();
   });
 
