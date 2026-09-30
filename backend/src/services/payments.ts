@@ -349,6 +349,11 @@ export async function sendBatch(
   await relayerKeyManager.signTransaction(tx);
   const res: any = await (horizonServer as any).submitTransaction(tx);
   log("info", "batch_sent", { ops: ops.length, hash: res.hash });
+  if (muxedCount > 0) {
+    noteSponsorshipCreated(muxedCount);
+    const { sponsorshipReserveXlm: gauge } = await import("./metrics.js");
+    gauge.set(getSponsorshipReserveXlm());
+  }
   return { hash: res.hash, ops: ops.length };
 }
 

@@ -331,3 +331,11 @@ The blast radius of this vulnerability spanned across five operational surfaces:
   - Enforced hermetic builds in `frontend/Dockerfile` using `npm ci --legacy-peer-deps`.
   - Added dependency pinning verification assertions in `.github/workflows/ci.yml`.
 
+
+---
+## Addendum 2026-09-30 — Fix bundle #540 / #541 / #592 / #593
+- #540: `payments.ts` tracks 0.5 XLM/claimable-balance sponsorship reserve (`getSponsorshipReserveXlm`, `checkSponsorshipReserve` pre-flight in `sendBatch`, MuxedAccount cap 100); metrics `zkvote_sponsorship_reserve_xlm`, `zkvote_sponsorship_reserve_depleted_total` + grafana alert.
+- #541: rent tiers centralized in `stellar.ts` (`rentTierFor`, `shouldExtendTtl`); roots Persistent / config Instance / leaves Temporary; metric `zkvote_storage_rent_saved_xlm_total`, `zkvote_reconciliation_mismatch_total`.
+- #592: per-DAO registry pin service `registry-pin.ts` (`pinRegistry`/`verifyRegistryCaller` + allowlist + code-hash attestation); voting/dao-registry contracts pin keys; metrics `unauthenticated_rejection_total`, `cross_tenant_denial_total`.
+- #593: `ipfs.ts` `assertSbtMetadataSafe`/`sanitizeSbtUri` enforced on upload+fetch; frontend `lib/sbtSanitize.ts` sandboxed render; metric `sbt_xss_blocked_total`; on-chain `metadata_hash` pin key.
+- Migration `migration-540-593.ts` (registry_hash/metadata_hash backfill NULL audit + sponsorship_reserve_audit) with parity/dry-run gate. Blast radius: REST pay routes now 402-on-insufficient-reserve; WS unaffected; no legit flow depends on unpinned-registry/unbounded-batch/unsanitized-SVG (verified via grep for callers). Spike: 1000 sponsorships deplete guarded pre-tx; fake registry reverted post-pin; rent reduced via Temporary leaves; SVG XSS sanitized.

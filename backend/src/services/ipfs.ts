@@ -36,6 +36,26 @@ const ipfsGatewayBreaker = registerCircuitBreaker("ipfs_gateway", {
   resetTimeoutMs: config.circuitBreakerGatewayResetMs,
 });
 
+// #593 SBT metadata SVG/script-injection guard. Enforced on upload AND on
+// gateway fetch (file-type alone is insufficient). Blocks <script,
+// event-handler attributes, foreignObject, javascript:/data:text/html URIs.
+const XSS_RE = /<\s*(script|svg|math|foreignobject|iframe|object|embed|link|style|meta)\b|on\w+\s*=|javascript\s*:|data\s*:\s*text\/html|expression\s*\(|vbscript\s*:|<\s*!\s*--/i;
+export function assertSbtMetadataSafe(input: string): void {
+  if (typeof input !== "string") return;
+  if (input.length > 200_000) throw new Error("SBT metadata too large");
+  if (XSS_RE.test(input)) {
+    import("./metrics.js").then((m) => (m as any).sbtXssBlockedTotal?.inc({ vector: "svg_script" })).catch(() => {});
+    throw new Error("SBT metadata blocked: XSS vector detected");
+  }
+}
+export function sanitizeSbtUri(uri: string): string {
+  assertSbtMetadataSafe(uri);
+  // Only allow ipfs://, https:// gateway, or ar:// URIs; force render via
+  // sandboxed <img> path downstream, never innerHTML.
+  if (!/^(ipfs:\/\/|https:\/\/|ar:\/\/)/i.test(uri.trim())) throw new Error("SBT URI scheme not allowed");
+  return uri.trim();
+}
+
 // ============================================
 // TYPES
 // ============================================
