@@ -1314,10 +1314,42 @@ impl MembershipTree {
                 let zero_at_level = Self::zero_at_level_for_field(env, level, &field);
                 current_hash = Self::hash_pair(env, &current_hash, &zero_at_level, &field);
             } else {
-                // Right child - use filled subtree from left
-                let left = filled
-                    .get(level)
-                    .unwrap_or_else(|| Self::zero_at_level_for_field(env, level, &field));
+                // Right child - the left sibling's authoritative hash.
+                //
+                // Do NOT read this straight out of the `filled` cache: the cache
+                // is only a mirror, and any write path that forgets to refresh it
+                // (e.g. an update/reinstatement) would silently splice a stale
+                // subtree into a brand-new root — a root that `root_ok` accepts
+                // but that no `get_merkle_path` can reproduce, bricking ZK voting.
+                // NodeHash/LeafValue is the source of truth and is rewritten
+                // bottom-up by every path that mutates a leaf, so it is always
+                // current. `filled` remains a fallback for the not-yet-written
+                // (all-zero) case.
+                let left_index = current_index - 1;
+                let cached = || {
+                    filled
+                        .get(level)
+                        .unwrap_or_else(|| Self::zero_at_level_for_field(env, level, &field))
+                };
+                let left: U256 = if level == 0 {
+                    // Level 0: sibling is a leaf; hash it the same way its own
+                    // insertion did (LeafValue holds the raw commitment).
+                    match env
+                        .storage()
+                        .persistent()
+                        .get::<_, U256>(&DataKey::LeafValue(dao_id, left_index))
+                    {
+                        Some(raw_sibling) => Self::hash_leaf(env, &raw_sibling, &field),
+                        None => cached(),
+                    }
+                } else {
+                    env.storage()
+                        .persistent()
+                        .get(&DataKey::NodeHash(dao_id, level, left_index))
+                        .unwrap_or_else(cached)
+                };
+                // Keep the cache a faithful mirror of the value we just used.
+                filled.set(level, left.clone());
                 current_hash = Self::hash_pair(env, &left, &current_hash, &field);
             }
             // Store intermediate node hash at level+1 (since level 0 is leaves)
@@ -1386,6 +1418,17 @@ impl MembershipTree {
         env.storage().persistent().set(&leaf_val_key, &new_value);
         Self::bump_persistent(env, &leaf_val_key);
 
+        // Load the cached left-sibling subtrees so they can be kept in sync
+        // with the recomputed path. `insert_leaf` reads `filled[level]` when the
+        // incoming node is a *right* child, so leaving this cache stale after a
+        // removal/reinstatement silently mixes a pre-update subtree hash into a
+        // fresh root (C-class: irreversible ZK-voting brick).
+        let mut filled: Vec<U256> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::FilledSubtrees(dao_id))
+            .unwrap_or_else(|| panic_with_error!(env, TreeError::TreeNotInitialized));
+
         // Recompute path from leaf to root
         // Domain-separate the leaf before it becomes a tree node value (#167).
         let mut current_index = leaf_index;
@@ -1398,6 +1441,14 @@ impl MembershipTree {
             } else {
                 current_index - 1
             };
+
+            // Mirror `insert_leaf`: when the recomputed node is a left child it
+            // *is* the completed left subtree for this level, so it must replace
+            // the cached value. Writing it here is what keeps a later insert that
+            // forms a right child at this level consistent with this root.
+            if is_left {
+                filled.set(level, current_hash.clone());
+            }
 
             // Get sibling hash from stored NodeHash or use zero if doesn't exist
             let sibling: U256 = if level == 0 {
@@ -1436,6 +1487,11 @@ impl MembershipTree {
 
             current_index = parent_index;
         }
+
+        // Persist the refreshed left-sibling cache before publishing the new root.
+        let filled_key = DataKey::FilledSubtrees(dao_id);
+        env.storage().persistent().set(&filled_key, &filled);
+        Self::bump_persistent(env, &filled_key);
 
         // Update root history with FIFO cap
         let roots_key = DataKey::Roots(dao_id);

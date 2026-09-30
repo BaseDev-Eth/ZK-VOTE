@@ -43,8 +43,37 @@ jobs:
         run: cargo test -p zkvote-integration-tests --locked -- --test-threads=1
       - name: Groth16 production edge corpus
         run: cargo test -p zkvote-groth16 --test bn254_edge_case_corpus --locked -- --nocapture
+      - name: Groth16 verifier stub gate
+        # Fails if `verify_groth16` ever stops really verifying in a default
+        # build. The stub is reachable only via the `testutils` feature, so a
+        # regression that widens the gate turns this red.
+        run: cargo test -p zkvote-groth16 --test verifier_stub_gate --locked -- --nocapture
       - name: Groth16 testutils stub behavior
         run: cargo test -p zkvote-groth16 --features testutils --test bn254_edge_case_corpus testutils_feature_uses_stubbed_verifier --locked -- --nocapture
+      - name: Verifier stub cannot reach a wasm build
+        # The `testutils` feature makes verification return `true`. It must be
+        # impossible to compile a contract with it on, so `--all-features`
+        # (or any future feature that forwards it) fails the build instead of
+        # quietly shipping a contract that accepts every proof. The inverted
+        # exit check is the point: success here means the build FAILED.
+        run: |
+          set -euo pipefail
+          if cargo build --target wasm32v1-none --release --all-features --locked; then
+            echo "::error::an --all-features wasm build succeeded, so the testutils verifier stub is reachable from a deployable build"
+            exit 1
+          fi
+          echo "ok: --all-features wasm build is rejected"
+      - name: All-features build is verifier-clean
+        # The build must also succeed without any feature, and the resulting
+        # wasm must not contain the marker string emitted by the stub.
+        run: |
+          set -euo pipefail
+          cargo build --target wasm32v1-none --release --locked
+          if grep -rl "ZKVOTE_GROTH16_STUB_ACTIVE" target/wasm32v1-none/release/ 2>/dev/null; then
+            echo "::error::a release wasm contains the verifier stub marker"
+            exit 1
+          fi
+          echo "ok: release wasm is free of the verifier stub marker"
       - name: Doc check
         run: cargo doc --workspace --no-deps --locked
       - name: Security audit
@@ -70,6 +99,14 @@ jobs:
       - name: Type check
         run: npm run type-check
       - name: Drift guard
+        # ZK_VOTE_ALLOW_MISSING_VKEY=1: the vote proving/verification key is
+        # produced by the MPC trusted setup, not by CI, and is deliberately not
+        # committed (see frontend/public/circuits/README.md). Every OTHER public
+        # signal check still applies and still fails the build — including the
+        # circuit/contract/frontend count agreement and the IC-length check on
+        # any key that is present.
+        env:
+          ZK_VOTE_ALLOW_MISSING_VKEY: "1"
         run: npm run drift:check
       - name: Lint (includes JSDoc validation)
         run: npm run lint

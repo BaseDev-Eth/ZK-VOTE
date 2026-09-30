@@ -70,7 +70,7 @@
 use soroban_sdk::{Bytes, BytesN, Env, Vec, U256};
 
 use crate::{is_in_field, Proof, VerificationKey};
-#[cfg(not(any(test, feature = "testutils")))]
+#[cfg(not(feature = "testutils"))]
 use crate::{Bn254Curve, Groth16Curve};
 
 /// Domain separation for the Fiat-Shamir transcript. Bumping this string
@@ -211,7 +211,7 @@ fn varying_columns(pub_signals: &Vec<Vec<U256>>, env: &Env) -> Vec<u32> {
     varying
 }
 
-#[cfg(not(any(test, feature = "testutils")))]
+#[cfg(not(feature = "testutils"))]
 fn verify_groth16_batch_impl(
     env: &Env,
     vk: &VerificationKey,
@@ -351,15 +351,17 @@ pub fn verify_groth16_batch(
         );
     }
 
-    // Test-mode bypass, matching `verify_groth16`: returns true without doing
-    // curve arithmetic so contract tests can run without real proofs.
-    // WARNING: does not exercise the production verification path.
-    #[cfg(any(test, feature = "testutils"))]
+    // Test-mode bypass. See the stub gate documented at the top of lib.rs: it
+    // is the `testutils` cargo feature, and a wasm32 build that enables it does
+    // not compile (compile_error!), so this can never be linked into a
+    // contract.
+    #[cfg(feature = "testutils")]
     {
+        let _ = (env, vk, proofs, pub_signals);
         true
     }
 
-    #[cfg(not(any(test, feature = "testutils")))]
+    #[cfg(not(feature = "testutils"))]
     verify_groth16_batch_impl(env, vk, proofs, pub_signals)
 }
 

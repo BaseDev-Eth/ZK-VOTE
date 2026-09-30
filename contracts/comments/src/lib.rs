@@ -160,6 +160,12 @@ pub enum DataKey {
     CommentNullifier(u64, u64, U256), // (dao_id, proposal_id, nullifier) -> bool (for duplicate detection)
     CommitmentNonce(u64, u64, U256), // (dao_id, proposal_id, commitment) -> next nonce for this commitment
     VotingContract,                  // Address of voting contract for proposal lookups and VK
+    /// Test-only: overrides proof verification. NOT USED IN PRODUCTION.
+    ///
+    /// Appended at the end so existing storage discriminants stay stable. Only
+    /// `#[cfg(test)]` code reads it and only `#[cfg(test)]` code writes it, so
+    /// no deployable build can disable proof verification through this key.
+    VerifyOverride,
 }
 
 /// Who deleted a comment
@@ -1197,23 +1203,68 @@ impl Comments {
     }
 
     /// Verify Groth16 proof using shared verification library.
+    ///
+    /// In a `cfg(test)` build only, an instance-storage override lets a test
+    /// decide the outcome of verification so it can exercise logic around the
+    /// check without a real proof. Gated on `cfg(test)` rather than a cargo
+    /// feature, so no deployable build can consult it and there is no setter
+    /// outside tests. An unset override in a test build accepts a well-shaped
+    /// proof, matching the long-standing behaviour of this suite.
     fn verify_groth16(
         env: &Env,
         vk: &VerificationKey,
         proof: &Proof,
         pub_signals: &Vec<U256>,
     ) -> bool {
+        #[cfg(test)]
+        {
+            if let Some(override_val) = env
+                .storage()
+                .instance()
+                .get::<DataKey, bool>(&DataKey::VerifyOverride)
+            {
+                return override_val;
+            }
+            // Bypass the pairing, not the structural IC/signal-count check.
+            return pub_signals.len() + 1 == vk.ic.len();
+        }
+
+        #[cfg(not(test))]
         zkvote_groth16::verify_groth16(env, vk, proof, pub_signals)
     }
 
     /// Verify BLS12-381 Groth16 proof using shared verification library.
+    ///
+    /// Same `cfg(test)`-only override as [`Comments::verify_groth16`].
     fn verify_groth16_bls381(
         env: &Env,
         vk: &VerificationKeyBls381,
         proof: &ProofBls381,
         pub_signals: &Vec<U256>,
     ) -> bool {
+        #[cfg(test)]
+        {
+            if let Some(override_val) = env
+                .storage()
+                .instance()
+                .get::<DataKey, bool>(&DataKey::VerifyOverride)
+            {
+                return override_val;
+            }
+            return pub_signals.len() + 1 == vk.ic.len();
+        }
+
+        #[cfg(not(test))]
         zkvote_groth16::verify_groth16_bls381(env, vk, proof, pub_signals)
+    }
+
+    /// Test-only: force the outcome of proof verification for the remainder of
+    /// the test. Compiled out of every non-test build.
+    #[cfg(test)]
+    fn set_verify_override_for_tests(env: Env, accept: bool) {
+        env.storage()
+            .instance()
+            .set(&DataKey::VerifyOverride, &accept);
     }
 }
 

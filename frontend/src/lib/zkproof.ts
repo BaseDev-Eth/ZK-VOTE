@@ -139,17 +139,15 @@ export interface VoteProofInput {
   proposalId: string;
   voteChoice: string; // "0" for no, "1" for yes
   /** Public signal: must match on-chain ElectionConfig.num_candidates (#645) */
-  numCandidates: string;
-  relayerAddress: string; // Relayer Stellar address - public signal for relayer binding
+  numCandidates: string; // bounds voteChoice in-circuit
   commitment: string; // Identity commitment - private input, computed internally in circuit
   pathElements: string[];
   pathIndices: number[];
   circuitVersion?: string; // "v1" or "v2" (defaults to "v1")
   chainId?: string; // Required for v2 circuits
-  /** v2 only: Poseidon(secret, daoId, proposalId, chainId) */
-  familyNullifier?: string;
-  /** v2 only: revote nonce (defaults to "0") */
-  nonce?: string;
+  familyNullifier?: string; // v2 only: breaks cross-proposal linkability
+  nonce?: string; // v2 only: re-vote counter
+  relayerAddress?: string; // v2 only
 }
 
 export interface CommentProofInput {
@@ -623,7 +621,7 @@ export async function generateVoteProof(
         numCandidates: input.numCandidates,
         chainId: input.chainId || "0",
         nonce: input.nonce ?? "0",
-        relayerAddress: input.relayerAddress,
+        relayerAddress: input.relayerAddress ?? "0",
         secret: input.secret,
         salt: input.salt,
         blindingFactor: input.blindingFactor,
@@ -631,7 +629,21 @@ export async function generateVoteProof(
         pathIndices: input.pathIndices,
       };
     } else {
-      // vote_v1.circom: 7 public signals including numCandidates (#645)
+      // vote.circom: 6 public signals
+      //   [root, nullifier, daoId, proposalId, voteChoice, numCandidates]
+      //
+      // `numCandidates` is not optional. The circuit range-checks
+      // `voteChoice < numCandidates` against this PUBLIC input so the contract
+      // can be sure the proof enforced the candidate bound the election was
+      // configured with. Leaving it out leaves the signal at 0, which makes
+      // `voteChoice < 0` unsatisfiable — so the witness cannot be generated at
+      // all. It was missing here, which is one reason the anonymous vote path
+      // produced no usable proofs.
+      //
+      // There is deliberately no `relayerAddress` on this path: see the header
+      // of circuits/vote_template.circom. A public signal that the verifier
+      // cannot check binds nothing, and adding it made the IC length disagree
+      // with the contract.
       circuitInput = {
         root: input.root,
         nullifier: input.nullifier,
@@ -639,7 +651,6 @@ export async function generateVoteProof(
         proposalId: input.proposalId,
         voteChoice: input.voteChoice,
         numCandidates: input.numCandidates,
-        relayerAddress: input.relayerAddress,
         secret: input.secret,
         salt: input.salt,
         blindingFactor: input.blindingFactor,

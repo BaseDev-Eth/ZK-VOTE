@@ -8,7 +8,6 @@
     "compile": "../scripts/compile-circuits.sh",
     "compile:docker": "../scripts/compile-circuits.sh --docker",
     "compile:direct": "circom vote.circom --r1cs --wasm --sym -o build",
-    "compile": "circom vote.circom --r1cs --wasm --sym -o build",
     "compile:qv": "circom quadratic_vote_main.circom --r1cs --wasm --sym -o build/quadratic_vote",
     "compile:weighted-vote": "circom weighted_vote.circom --r1cs --wasm --sym -o build/weighted_vote",
     "compile:pedersen-commitment": "circom test/pedersen_commitment_test.circom --r1cs --wasm --sym -o build/pedersen_test",

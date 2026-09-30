@@ -218,9 +218,7 @@ impl CircuitRegistry {
         env.storage()
             .instance()
             .set(&MIN_VK_TIMELOCK, &DEFAULT_MIN_VK_TIMELOCK);
-        env.storage()
-            .instance()
-            .set(&VK_QUORUM, &DEFAULT_VK_QUORUM);
+        env.storage().instance().set(&VK_QUORUM, &DEFAULT_VK_QUORUM);
     }
 
     fn assert_governance(env: &Env) {
@@ -268,8 +266,12 @@ impl CircuitRegistry {
         if required_approvals == 0 {
             panic_with_error!(&env, RegistryError::VkProposalInvalidQuorum);
         }
-        env.storage().instance().set(&MIN_VK_TIMELOCK, &min_timelock);
-        env.storage().instance().set(&VK_QUORUM, &required_approvals);
+        env.storage()
+            .instance()
+            .set(&MIN_VK_TIMELOCK, &min_timelock);
+        env.storage()
+            .instance()
+            .set(&VK_QUORUM, &required_approvals);
     }
 
     pub fn register_circuit(
