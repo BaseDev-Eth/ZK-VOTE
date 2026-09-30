@@ -421,7 +421,7 @@ if [ "$MODE" = "fresh" ]; then
     # Fresh deployment
     echo "Deploying new contract instance..."
     soroban contract deploy \
-        --wasm target/wasm32-unknown-unknown/release/voting.wasm \
+        --wasm target/wasm32v1-none/release/voting.wasm \
         --network $NETWORK
 else
     # Upgrade existing
@@ -430,7 +430,7 @@ else
 
     # Upload new WASM
     WASM_HASH=$(soroban contract install \
-        --wasm target/wasm32-unknown-unknown/release/voting.wasm \
+        --wasm target/wasm32v1-none/release/voting.wasm \
         --network $NETWORK)
 
     echo "Proposing upgrade to $WASM_HASH..."

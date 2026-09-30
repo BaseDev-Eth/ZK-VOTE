@@ -1323,3 +1323,81 @@ export const remediationHistoryQuerySchema = z.object({
     .max(1000, "limit must be at most 1000")
     .default(50),
 });
+
+// ============================================
+// PAYMENTS / SWAP SCHEMAS (#594 #597)
+// Single source of truth for pay + swap routes AND openapi.ts ENDPOINTS.
+// Addresses are Stellar StrKey-encoded: G... (ed25519 public key) or M...
+// (muxed account, G... base + 64-bit ID). M... and G... are NOT
+// interchangeable — sending a muxed-bound payment to the bare G... base
+// credits the shared base balance instead of the virtual sub-account.
+// ============================================
+
+const STELLAR_G_RE = /^G[A-Z2-7]{55}$/;
+const STELLAR_M_RE = /^M[A-Z2-7]{68}$/;
+
+export const stellarGAddressSchema = z
+  .string()
+  .regex(STELLAR_G_RE, "must be a valid Stellar G... address")
+  .openapi({ example: "GABCDEF234567...", description: "Stellar ed25519 public key (G...)" });
+
+export const stellarMuxedAddressSchema = z
+  .string()
+  .regex(STELLAR_M_RE, "must be a valid Stellar M... muxed address")
+  .openapi({ example: "MAAAAAAAAA...", description: "Stellar muxed account (M...)" });
+
+export const stellarDestinationSchema = z
+  .string()
+  .refine((v) => STELLAR_G_RE.test(v) || STELLAR_M_RE.test(v), {
+    message: "destination must be a valid Stellar G... or M... address",
+  })
+  .openapi({
+    example: "GABCDEF234567...",
+    description:
+      "Payment destination. G... = base account, M... = muxed sub-account. They are not interchangeable.",
+  });
+
+export const paymentAssetSchema = z
+  .enum(["XLM", "USDC", "EURC"])
+  .openapi({ example: "XLM", description: "Payment asset code" });
+
+export const paymentAmountSchema = z
+  .string()
+  .regex(/^\d+(\.\d{1,7})?$/, "amount must be a decimal string with up to 7 decimals")
+  .refine((v) => Number(v) > 0, { message: "amount must be > 0" })
+  .openapi({ example: "10.0000000", description: "Amount as decimal string, max 7 decimals" });
+
+export const paymentOpSchema = z
+  .object({
+    destination: stellarDestinationSchema,
+    asset: paymentAssetSchema,
+    amount: paymentAmountSchema,
+    memo: z.string().max(28).optional().openapi({ example: "invoice-42" }),
+  })
+  .openapi("PaymentOp");
+
+export const payRequestSchema = paymentOpSchema.openapi("PayRequest");
+
+export const payBatchRequestSchema = z
+  .object({
+    ops: z.array(paymentOpSchema).min(1).max(100).openapi({ description: "Batch operations (max 100/tx)" }),
+  })
+  .openapi("PayBatchRequest");
+
+export const swapQuoteQuerySchema = z.object({
+  from: paymentAssetSchema,
+  to: paymentAssetSchema,
+  amount: paymentAmountSchema,
+});
+
+export const swapSubmitRequestSchema = z
+  .object({
+    from: paymentAssetSchema,
+    to: paymentAssetSchema,
+    amount: paymentAmountSchema,
+    destMin: paymentAmountSchema.optional().openapi({ example: "9.5000000" }),
+    destination: stellarDestinationSchema.optional().openapi({
+      description: "Defaults to the relayer account when omitted",
+    }),
+  })
+  .openapi("SwapSubmitRequest");

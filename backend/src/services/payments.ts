@@ -4,7 +4,7 @@
  */
 import * as StellarSdk from "@stellar/stellar-sdk";
 import { config } from "../config.js";
-import { relayerKeypair } from "./stellar.js";
+import { relayerKeypair, withSequenceLock } from "./stellar.js";
 import { relayerKeyManager } from "./relayerKeyManager.js";
 import { log } from "./logger.js";
 import { getDb } from "./db.js";
@@ -355,6 +355,7 @@ export async function sendBatch(
     gauge.set(getSponsorshipReserveXlm());
   }
   return { hash: res.hash, ops: ops.length };
+  });
 }
 
 /**
@@ -410,6 +411,7 @@ export async function swapStrictSend(
   await relayerKeyManager.signTransaction(tx);
   const res: any = await (horizonServer as any).submitTransaction(tx);
   return { hash: res.hash };
+  });
 }
 
 /**

@@ -102,7 +102,6 @@ export default function PayPanel() {
         return;
       }
     }
-    
     setLoading(true);
     const idempotencyKey = generateIdempotencyKey("pay");
     const pendingPayment: PendingPayment = { idempotencyKey, timestamp: Date.now() };
@@ -167,22 +166,7 @@ export default function PayPanel() {
     pendingPaymentRef.current = pendingPayment;
     
     try {
-      const res = await relayerFetch("/pay/batch", { 
-        method: "POST", 
-        headers: { "Content-Type": "application/json" }, 
-        body: JSON.stringify({ ops }),
-        idempotencyKey,
-      });
-      const text = await res.text();
-      let j: any = {};
-      try { j = text ? JSON.parse(text) : {}; } catch { j = { raw: text }; }
-      if (!res.ok) throw new Error(j.error || `HTTP ${res.status}: ${text.slice(0, 200)}`);
-      
-      // Update pending with hash
-      const updatedPending = { ...pendingPayment, hash: j.hash };
-      setPending(updatedPending);
-      pendingPaymentRef.current = updatedPending;
-      
+      const j = await sendBatchPayment(ops);
       alert(j.hash ? `Batch ${j.ops} sent: ${j.hash}` : JSON.stringify(j));
     } catch (e: any) { 
       alert(e.message); 

@@ -85,17 +85,10 @@ router.post("/pay", masterKeyGuard, csrfOriginGuard, bodyLimit("5kb"), async (re
   }
 });
 
-router.post("/pay/batch", masterKeyGuard, csrfOriginGuard, bodyLimit("256kb"), paymentBatchCostLimiter, async (req, res) => {
-  // Check idempotency key
-  const idempotencyKey = req.header("Idempotency-Key");
-  if (idempotencyKey) {
-    const existing = paymentIdempotency.get(idempotencyKey);
-    if (existing) {
-      log("info", "batch_idempotent_hit", { idempotencyKey: idempotencyKey.slice(0, 16), hash: existing.hash });
-      return res.status(200).json({ hash: existing.hash, idempotent: true });
-    }
-  }
-  
+import { batch_partial_failure_total } from "../services/metrics.js";
+import { payRequestSchema, payBatchRequestSchema } from "../validation/schemas.js";
+
+router.post("/pay/batch", csrfOriginGuard, bodyLimit("256kb"), async (req, res) => {
   try {
     const { ops } = req.body;
     if (!Array.isArray(ops))
