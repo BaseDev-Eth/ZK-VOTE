@@ -175,7 +175,12 @@ export default function CommentForm({
           daoId: daoId.toString(),
           proposalId: proposalId.toString(),
           voteChoice: "0", // Arbitrary - contract ignores this for comments
-          relayerAddress: "0",
+          // Required by the vote circuit: it constrains
+          // `voteChoice < numCandidates`, so the value must be at least 1 for a
+          // witness to exist. 2 is the floor a binary vote needs and matches
+          // what the voting contract reports for an election with no explicit
+          // candidate count.
+          numCandidates: "2",
           commitment: commitment.toString(),
           secret: secret.toString(),
           salt: salt.toString(),

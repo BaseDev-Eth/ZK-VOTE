@@ -646,14 +646,19 @@ impl Rewards {
         .publish(&env);
     }
 
-    #[allow(unused_variables)]
+    /// Verify Groth16 proof using shared verification library.
+    ///
+    /// In a `cfg(test)` build only, an instance-storage override lets a test
+    /// decide the outcome of verification. Gated on `cfg(test)` rather than a
+    /// cargo feature so no deployable build can consult it, and there is no
+    /// setter outside tests.
     fn verify_groth16(
         env: &Env,
         vk: &VerificationKey,
         proof: &Proof,
         pub_signals: &Vec<U256>,
     ) -> bool {
-        #[cfg(any(test, feature = "testutils"))]
+        #[cfg(test)]
         {
             if let Some(override_val) = env
                 .storage()
@@ -666,14 +671,31 @@ impl Rewards {
         if pub_signals.len() + 1 != vk.ic.len() {
             return false;
         }
-        #[cfg(any(test, feature = "testutils"))]
+
+        // A test build that did not set the override has no real proof to
+        // check against, so it accepts a well-shaped statement — the
+        // long-standing behaviour of this suite. `cfg(not(test))` is the only
+        // build that ever reaches the pairing check, and it always does.
+        #[cfg(test)]
         {
+            // The IC/signal-count check above already ran; only the pairing is
+            // bypassed here.
+            let _ = (env, vk, proof, pub_signals);
             true
         }
-        #[cfg(not(any(test, feature = "testutils")))]
+        #[cfg(not(test))]
         {
             zkvote_groth16::verify_groth16(env, vk, proof, pub_signals)
         }
+    }
+
+    /// Test-only: force the outcome of proof verification for the remainder of
+    /// the test. Compiled out of every non-test build.
+    #[cfg(test)]
+    fn set_verify_override_for_tests(env: Env, accept: bool) {
+        env.storage()
+            .instance()
+            .set(&DataKey::VerifyOverride, &accept);
     }
 }
 

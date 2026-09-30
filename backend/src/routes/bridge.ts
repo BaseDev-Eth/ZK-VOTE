@@ -71,6 +71,7 @@ router.post(
       sbtRoot,
       sbtContractAddr,
       memberAddr,
+      chainId,
       proof,
     } = config.stripRequestBodies ? ({} as Record<string, never>) : req.body;
 
@@ -86,6 +87,7 @@ router.post(
         voteChoice,
         voteRoot,
         sbtRoot,
+        chainId,
       });
 
       if (!proofValid) {

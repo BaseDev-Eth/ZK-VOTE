@@ -44,6 +44,7 @@
     "docs:types": "openapi-typescript openapi.json -o src/generated/api-types.ts",
     "config:generate": "tsx scripts/generate-env-example.ts",
     "config:check": "tsx scripts/generate-env-example.ts --check 2>&1 || (echo \"\n.env.example is out of sync! Run: npm run config:generate\" && exit 1)",
+    "config:security": "tsx scripts/check-config-security.ts",
     "db:generate-types": "kysely-codegen --dialect sqlite --data data/zkvote.db --out-src/generated/db-types.ts"
   },
   "keywords": [
@@ -82,7 +83,11 @@
     "zod": "3.25.76"
   },
   "overrides": {
-    "axios": "1.16.0"
+    "axios": "1.16.0",
+    "snarkjs": "0.7.5",
+    "circom_runtime": "0.1.28",
+    "ffjavascript": "0.2.63",
+    "wasmcurves": "0.2.2"
   },
   "devDependencies": {
     "@eslint/js": "10.0.1",

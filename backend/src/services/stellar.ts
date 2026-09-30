@@ -29,6 +29,21 @@ import {
 } from "./circuit-breaker.js";
 import { withSpan } from "./tracing.js";
 import type { Groth16Proof } from "../types/index.js";
+// #541 Soroban rent economics: Persistent costs ~10x Temporary. Roots/config
+// stay Persistent/Instance (long-lived, TTL-extended); leaves/ephemeral data
+// must prefer Temporary. Centralize TTL + rent budgeting here so extend_ttl
+// calls are economical, not blind bumps.
+export const RENT_PERSISTENT_LEDGERS = 535_680; // ~31d extend
+export const RENT_TEMPORARY_LEDGERS = 120_960; // shorter, cheaper
+export const RENT_THRESHOLD_LEDGERS = 120_960;
+export function rentTierFor(keyKind: "root" | "config" | "leaf" | "ephemeral"): "persistent" | "instance" | "temporary" {
+  if (keyKind === "root" || keyKind === "config") return keyKind === "config" ? "instance" : "persistent";
+  return "temporary";
+}
+/** Returns true only when TTL extension is economically justified (below threshold). */
+export function shouldExtendTtl(currentTtl: number, threshold: number = RENT_THRESHOLD_LEDGERS): boolean {
+  return currentTtl <= threshold;
+}
 import { BN254_FQ_MODULUS } from "../types/index.js";
 import type { RpcServerPort } from "./interfaces.js";
 import nodeCluster from "node:cluster";

@@ -43,7 +43,7 @@ router.get("/metrics", async (req: Request, res: Response) => {
   }
   const bufA = Buffer.from(token);
   const bufB = Buffer.from(expected);
-  if (bufA.length !== bufB.length || !timingSafeEqual(bufA, bufB)) {
+  if (bufA.length !== bufB.length || !timingSafeEqual(new Uint8Array(bufA), new Uint8Array(bufB))) {
     return res.status(401).json({ error: "Unauthorized" });
   }
   try {

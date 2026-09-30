@@ -1,7 +1,7 @@
 {
   "title": "ZKVote Relayer",
   "schemaVersion": 39,
-  "version": 1,
+  "version": 2,
   "refresh": "30s",
   "time": { "from": "now-1h", "to": "now" },
   "templating": { "list": [{ "name": "job", "type": "query", "query": "label_values(zkvote_http_requests_total, job)", "includeAll": true, "multi": true, "current": { "text": "All", "value": ["$__all"] } }] },

@@ -169,7 +169,9 @@ const corsOriginList = String(config.corsOrigins || "*")
   .filter(Boolean);
 
 if (process.env.NODE_ENV === "production" && corsOriginList.includes("*")) {
-  console.error("[fatal] CORS_ORIGIN='*' is forbidden when NODE_ENV=production");
+  console.error(
+    "[fatal] CORS_ORIGIN='*' is forbidden when NODE_ENV=production",
+  );
   process.exit(1);
 }
 
@@ -488,6 +490,9 @@ export const graduatedSlowDown = isTestMode
       store: getStore("slowDown") as any,
       keyGenerator,
       validate: { delayMs: false },
+      // A comment/query burst must not consume a vote's global slowdown
+      // budget. Vote endpoints retain their stricter wallet + vote limiters.
+      skip: (req) => isCriticalRequest(req.method, req.path),
     });
 
 /**
@@ -591,7 +596,8 @@ export const commitmentRegistrationLimiter = isTestMode
       windowMs: config.commitmentRegistrationRateWindowMs,
       message:
         "Too many commitment registrations for this member, please try again later",
-      onBlocked: () => membershipRegistrationLimited.inc({ reason: "api_rate_limit" }),
+      onBlocked: () =>
+        membershipRegistrationLimited.inc({ reason: "api_rate_limit" }),
     });
 
 /**
@@ -636,7 +642,7 @@ export function costBasedLimiter(opts: {
   windowMs: number;
   message: string;
 }): RequestHandler {
-  const store = getStore(opts.name);
+  getStore(opts.name);
   const costTracking = new Map<string, { cost: number; resetTime: number }>();
 
   return (req: Request, res: Response, next: NextFunction) => {

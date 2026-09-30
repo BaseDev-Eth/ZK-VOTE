@@ -29,6 +29,8 @@ export interface BridgePublicInputs {
   voteChoice: number;
   voteRoot: string;
   sbtRoot: string;
+  /** EVM chain id — required public signal (#649) */
+  chainId: string | number;
 }
 
 type SnarkjsProof = {
@@ -113,6 +115,7 @@ export function buildBridgePublicSignals(inputs: BridgePublicInputs): string[] {
     fieldToSignal(inputs.voteChoice),
     fieldToSignal(inputs.voteRoot),
     fieldToSignal(inputs.sbtRoot),
+    fieldToSignal(inputs.chainId),
   ];
 }
 

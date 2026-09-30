@@ -49,6 +49,9 @@ const validBridgeVote = {
   nullifier: "0x1234",
   voteRoot: "0xabcd",
   sbtRoot: "0xef00",
+  sbtContractAddr: "0x1111",
+  memberAddr: "0x2222",
+  chainId: 1,
   proof: { a: TWO_G1, b: TWO_G2, c: C_G1 },
 };
 

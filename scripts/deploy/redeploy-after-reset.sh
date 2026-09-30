@@ -1,5 +1,11 @@
 #!/bin/bash
-set -e
+set -euo pipefail
+
+# SECURITY WARNING:
+# - This script force-pushes to a hardcoded production server
+# - Verify SERVER environment variable before running
+# - Ensure network passphrase matches target network
+# - Review all changes before deploying to production
 
 echo "=== ZKVote Post-Network-Reset Redeployment ==="
 echo ""
@@ -46,11 +52,16 @@ success "Account funded: $ADMIN_ADDRESS"
 
 # Step 1: Run the main deploy script
 step "Running contract deployment..."
-RPC_URL="$RPC_URL" NETWORK_PASSPHRASE="$NETWORK_PASSPHRASE" \
-  bash scripts/deploy/deploy-hosted-futurenet.sh
+if ! RPC_URL="$RPC_URL" NETWORK_PASSPHRASE="$NETWORK_PASSPHRASE" \
+  bash scripts/deploy/deploy-hosted-futurenet.sh; then
+  fail "Contract deployment failed"
+fi
 
 # Step 2: Fix networkName (deploy script always writes "futurenet")
 step "Fixing network name in frontend config..."
+if [ ! -f "frontend/src/config/contracts.ts" ]; then
+  fail "frontend/src/config/contracts.ts not found after deployment"
+fi
 sed -i '' 's/networkName: "futurenet"/networkName: "testnet"/' frontend/src/config/contracts.ts 2>/dev/null || \
 sed -i 's/networkName: "futurenet"/networkName: "testnet"/' frontend/src/config/contracts.ts
 success "Network name set to testnet"
@@ -58,9 +69,24 @@ success "Network name set to testnet"
 # Step 3: Update production backend env
 step "Updating production backend configuration..."
 # Read the new contract IDs from the local .env (written by deploy script)
+if [ ! -f "backend/.env" ]; then
+  fail "backend/.env not found after deployment"
+fi
+
+# Validate contract IDs before updating production
 source <(grep -E "^(DAO_REGISTRY|MEMBERSHIP_SBT|VOTING|TREE|COMMENTS)_CONTRACT_ID=" backend/.env)
 
-# Update .env.production with new IDs
+if [[ ! "$DAO_REGISTRY_CONTRACT_ID" =~ ^C[A-Z0-9]{55}$ ]]; then
+  fail "Invalid DAO_REGISTRY_CONTRACT_ID format: $DAO_REGISTRY_CONTRACT_ID"
+fi
+
+if [ ! -f "backend/.env.production" ]; then
+  warn "backend/.env.production not found, creating from .env"
+  cp backend/.env backend/.env.production
+fi
+
+# Update .env.production with new IDs (with backup)
+cp backend/.env.production backend/.env.production.backup
 sed -i '' "s/DAO_REGISTRY_CONTRACT_ID=.*/DAO_REGISTRY_CONTRACT_ID=$DAO_REGISTRY_CONTRACT_ID/" backend/.env.production 2>/dev/null || \
 sed -i "s/DAO_REGISTRY_CONTRACT_ID=.*/DAO_REGISTRY_CONTRACT_ID=$DAO_REGISTRY_CONTRACT_ID/" backend/.env.production
 sed -i '' "s/MEMBERSHIP_SBT_CONTRACT_ID=.*/MEMBERSHIP_SBT_CONTRACT_ID=$MEMBERSHIP_SBT_CONTRACT_ID/" backend/.env.production 2>/dev/null || \
@@ -71,11 +97,12 @@ sed -i '' "s/TREE_CONTRACT_ID=.*/TREE_CONTRACT_ID=$TREE_CONTRACT_ID/" backend/.e
 sed -i "s/TREE_CONTRACT_ID=.*/TREE_CONTRACT_ID=$TREE_CONTRACT_ID/" backend/.env.production
 sed -i '' "s/COMMENTS_CONTRACT_ID=.*/COMMENTS_CONTRACT_ID=$COMMENTS_CONTRACT_ID/" backend/.env.production 2>/dev/null || \
 sed -i "s/COMMENTS_CONTRACT_ID=.*/COMMENTS_CONTRACT_ID=$COMMENTS_CONTRACT_ID/" backend/.env.production
-success "Production config updated"
+success "Production config updated (backup at .env.production.backup)"
 
 # Step 4: Deploy to server
 step "Syncing to server and rebuilding..."
-rsync -avz --delete \
+warn "Deploying to server: $SERVER"
+if ! rsync -avz --delete \
   --exclude 'target/' \
   --exclude 'node_modules/' \
   --exclude '.git/' \
@@ -87,9 +114,13 @@ rsync -avz --delete \
   --exclude '.env' \
   --exclude '*.log' \
   --exclude 'test-results/' \
-  ./ "$SERVER:/opt/zkvote/" 2>&1 | tail -3
+  ./ "$SERVER:/opt/zkvote/" 2>&1 | tee /tmp/rsync.log | tail -3; then
+  fail "rsync to server failed"
+fi
 
-ssh "$SERVER" "cd /opt/zkvote && docker compose down && docker compose build --no-cache 2>&1 | tail -5 && docker compose up -d 2>&1"
+if ! ssh "$SERVER" "cd /opt/zkvote && docker compose down && docker compose build --no-cache 2>&1 | tail -5 && docker compose up -d 2>&1"; then
+  fail "Server rebuild failed"
+fi
 success "Server rebuilt and restarted"
 
 # Step 5: Verify
