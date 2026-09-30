@@ -1,3 +1,62 @@
+# Incident Report — Issues #602–#605
+
+**Date:** 2026-09-27
+**Scope:** priority scheduling, SEP-24 anchor framing, Stellar amount precision,
+and image upload decoding
+
+## What failed
+
+- Comment writes and vote writes had separate route rate limiters, but the
+  existing priority queue lived outside the backend and had no live caller.
+  The global slowdown middleware could therefore delay a vote after a comment
+  burst.
+- Anchor responses could supply an interactive URL without an end-to-end
+  origin contract. A future iframe consumer could render an attacker-controlled
+  URL or accept an unrelated window's `postMessage`.
+- Swap values crossed Horizon and the UI as unconstrained decimal strings.
+  Nothing proved that `0.0000001` remained exactly one stroop or prevented
+  precision beyond Stellar's seven decimal places.
+- The image route used a handwritten magic-byte detector while the IPFS
+  service used `file-type`; the route also invoked `sharp` without
+  `limitInputPixels`. A malformed WebP could reach the decoder through the
+  weaker path.
+
+## Containment and blast radius
+
+- **REST:** vote capacity is now reserved before all three route mounts; the
+  swap and ramp endpoints reject malformed assets, accounts, amounts, and
+  anchor URLs with `400` responses.
+- **Browser / iframe:** interactive anchor URLs must match the configured
+  asset anchor on the server and the browser allowlist. The iframe is sandboxed
+  and messages require both the exact frame window and exact origin.
+- **SQLite / roles / WebSocket:** these four defects did not change database
+  rows, role boundaries, or WebSocket authorization, so no migration or role
+  change was required.
+- **Stellar / circuit:** decimal conversion is now string-to-`bigint` stroops
+  and back; contracts and circuits are unchanged because proof inputs and
+  on-chain encodings were not part of the affected path.
+- **Image processing:** handwritten and `file-type` detection must agree,
+  header dimensions are checked before decode, both `sharp` passes cap input
+  pixels, and configured ClamAV scanning fails closed.
+
+No chain transaction was submitted during the fix, so there is no Horizon or
+stellar.expert hash to attach. The empirical evidence is the deterministic
+local KAT suite: 100 comments no longer delay the vote, an evil anchor is
+rejected, `0.0000001` equals `1n`, an oversized WebP exposes 65,536×65,536
+dimensions before decode, and the EICAR vector is rejected.
+
+## Operational checks
+
+- Alert on any critical increase in `zkvote_priority_starvation_total`.
+- Configure `CLAMAV_SOCKET` or `CLAMAV_HOST`/`CLAMAV_PORT` to enable clamd
+  stream scanning; uploads fail closed if a configured scanner is unavailable.
+- Keep `VITE_ANCHOR_ORIGINS` and the Nginx `frame-src` list aligned when adding
+  a non-default anchor.
+- Existing Litestream backups remain unaffected because this patch has no
+  schema or persistence changes.
+
+---
+
 # Fix Report — IPFS Metadata Sanitization Injection Vectors
 
 **Issue:** `sanitizeMetadata` in `services/ipfs.ts` insufficient against advanced injection
@@ -255,6 +314,22 @@ The blast radius of this vulnerability spanned across five operational surfaces:
 | **Contract Integration Tests** | `cargo test -p zkvote-integration-tests -- --test-threads=1` | **Pass (exit 0)** |
 | **Frontend Build** | `npm run build` (in `frontend/`) | **Pass (exit 0)** |
 
+---
+
+# Fix Report — Issue #549: ZK Dependency Confusion & Float Pinning
+
+**Issue Resolved:**
+- **#549**: Dependency Confusion `snarkjs 0.7.5` vs `0.7.3` `circom_runtime 0.1.28` `ffjavascript 0.2.63` `wasmcurves` Float
+
+## 1. Vulnerability Analysis & Blast Radius
+- **Root Cause**: Floating dependency ranges (`^0.7.0`, `^0.7.5`, `^14.0.0`) in `frontend/package.json`, `circuits/ceremony/package.json`, `circuits/package.json`, and root `package.json` allowed npm resolution to install varying sub-dependencies (`snarkjs 0.7.3` vs `0.7.5`, `ffjavascript`, `circom_runtime`, `wasmcurves`). Differences between local development environments and CI runners produced incompatible `.zkey` headers and Groth16 proving errors.
+- **Blast Radius**: Proving failures, invalid public input parsing, and subtle incompatibility between Phase 2 ceremony artifacts and on-chain Soroban verifiers.
+- **Fix Implemented**:
+  - Pinned `snarkjs: 0.7.5` exactly across root `package.json`, `frontend/package.json`, `circuits/ceremony/package.json`, `circuits/package.json`, and `tests/e2e/package.json`.
+  - Pinned `@stellar/stellar-sdk: 15.1.0` in `frontend/package.json` and `tests/e2e/package.json` matching backend.
+  - Added workspace-wide package `overrides` for `snarkjs: 0.7.5`, `circom_runtime: 0.1.28`, `ffjavascript: 0.2.63`, and `wasmcurves: 0.2.2`.
+  - Enforced hermetic builds in `frontend/Dockerfile` using `npm ci --legacy-peer-deps`.
+  - Added dependency pinning verification assertions in `.github/workflows/ci.yml`.
 
 
 ---

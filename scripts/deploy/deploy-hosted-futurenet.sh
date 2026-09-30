@@ -1,6 +1,13 @@
 #!/bin/bash
 set -e
 
+# SECURITY WARNING:
+# - This script uses the same Stellar key for relayer, admin, and guardian roles
+# - In production, generate SEPARATE keys for each role using 'stellar keys generate'
+# - Never commit secret keys to version control
+# - Verify network passphrase matches your target network before deploying
+# - This script does NOT validate key format - check RELAYER_SECRET_KEY manually
+
 echo "=== Complete DaoVote Deployment Script ==="
 echo "This script will:"
 echo "1. Build all contracts"
@@ -324,26 +331,62 @@ done
 # Set verification key for Public DAO
 echo "Setting verification key..."
 VK_FILE="frontend/src/lib/verification_key_soroban.json"
-if [ -f "$VK_FILE" ]; then
-  VK_JSON=$(cat "$VK_FILE")
-  sleep 5  # Wait for sequence number to sync
-  if VK_OUTPUT=$(stellar contract invoke \
-    --id "$VOTING_ID" \
-    --rpc-url "$RPC_URL" \
-    --network-passphrase "$NETWORK_PASSPHRASE" \
-    --source "$KEY_NAME" \
-    -- set_vk \
-    --dao_id "$DAO_ID" \
-    --vk "$VK_JSON" \
-    --admin "$ADMIN_ADDRESS" 2>&1); then
-    success "Verification key set for Public DAO"
-  else
-    echo "$VK_OUTPUT"
-    warn "Verification key setting may have failed - check output above"
-  fi
+# NUM_PUBLIC_SIGNALS in contracts/voting/src/lib.rs; a Groth16 key has one more
+# IC point than the circuit has public signals.
+EXPECTED_VK_IC_LEN=7
+
+if [ ! -f "$VK_FILE" ]; then
+  # Previously this was a `warn` and the deploy continued, leaving a live DAO
+  # with no voting key: every `vote` call fails VkNotSet, so the DAO exists but
+  # nobody can vote. A missing key is a hard stop.
+  echo "ERROR: verification key not found at $VK_FILE"
+  echo ""
+  echo "  The key is produced by the trusted setup and must match the circuit's"
+  echo "  public-signal count. See frontend/public/circuits/README.md."
+  echo ""
+  echo "  Refusing to deploy a DAO that cannot accept votes."
+  exit 1
+fi
+
+VK_IC_LEN="$(node -e '
+    const fs = require("fs");
+    try {
+        const v = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
+        process.stdout.write(String((v.ic || v.IC || []).length));
+    } catch (e) { process.stdout.write(""); }
+' "$VK_FILE")"
+
+if [ "$VK_IC_LEN" != "$EXPECTED_VK_IC_LEN" ]; then
+  echo "ERROR: $VK_FILE has ${VK_IC_LEN:-0} IC points, expected $EXPECTED_VK_IC_LEN."
+  echo ""
+  echo "  set_vk rejects any key whose IC length is not NUM_PUBLIC_SIGNALS + 1, and"
+  echo "  verify_groth16 returns false when the counts disagree — so this key could"
+  echo "  not be registered, and even if it were, no proof would verify. Refusing to"
+  echo "  deploy. See frontend/public/circuits/README.md."
+  exit 1
+fi
+
+VK_JSON=$(cat "$VK_FILE")
+sleep 5  # Wait for sequence number to sync
+if VK_OUTPUT=$(stellar contract invoke \
+  --id "$VOTING_ID" \
+  --rpc-url "$RPC_URL" \
+  --network-passphrase "$NETWORK_PASSPHRASE" \
+  --source "$KEY_NAME" \
+  -- set_vk \
+  --dao_id "$DAO_ID" \
+  --vk "$VK_JSON" \
+  --admin "$ADMIN_ADDRESS" 2>&1); then
+  success "Verification key set for Public DAO"
 else
-  warn "Verification key file not found at $VK_FILE"
-  warn "You'll need to set it manually through the frontend UI"
+  echo "$VK_OUTPUT"
+  # `set_vk` also requires an MPC transcript attestation. A DAO without a
+  # registered key cannot vote, so this is fatal rather than advisory.
+  echo "ERROR: failed to register the verification key."
+  echo "  The DAO is deployed but CANNOT accept votes until set_vk succeeds."
+  echo "  Check the output above; a common cause is a missing transcript-registry"
+  echo "  attestation for this vk_hash (VkNotAttested, error #93)."
+  exit 1
 fi
 
 # Step 4: Update frontend configuration
@@ -413,12 +456,31 @@ if [ -f "backend/.env" ]; then
 fi
 
 # Get secret key from stellar CLI if not already set
+# WARNING: Generate separate keys for relayer and admin in production
+# Using the same key for multiple roles violates principle of least privilege
 KEY_SECRET=$(stellar keys show "$KEY_NAME" 2>/dev/null || echo "")
 
-# Use existing values or defaults
-RELAYER_SECRET="${EXISTING_RELAYER_SECRET:-${KEY_SECRET:-REPLACE_ME_RELAYER_SECRET}}"
+# Use existing values or generate new ones
+# In production: NEVER reuse the same key for relayer, admin, and guardian
+if [ -n "$EXISTING_RELAYER_SECRET" ]; then
+  RELAYER_SECRET="$EXISTING_RELAYER_SECRET"
+elif [ -n "$KEY_SECRET" ]; then
+  warn "SECURITY: Using $KEY_NAME for relayer. Generate dedicated keys in production!"
+  RELAYER_SECRET="$KEY_SECRET"
+else
+  warn "SECURITY: No relayer key configured. Set RELAYER_SECRET_KEY manually!"
+  RELAYER_SECRET="REPLACE_ME_RELAYER_SECRET"
+fi
+
+if [ -n "$EXISTING_ADMIN_SECRET" ]; then
+  ADMIN_SECRET="$EXISTING_ADMIN_SECRET"
+else
+  warn "SECURITY: No dedicated admin key configured. Using relayer key as fallback."
+  warn "In production: Generate separate keys with 'stellar keys generate admin'"
+  ADMIN_SECRET="${KEY_SECRET:-REPLACE_ME_ADMIN_SECRET}"
+fi
+
 AUTH_TOKEN="${EXISTING_AUTH_TOKEN:-$(openssl rand -hex 32)}"
-ADMIN_SECRET="${EXISTING_ADMIN_SECRET:-${KEY_SECRET:-REPLACE_ME_ADMIN_SECRET}}"
 CORS_ORIGINS="${EXISTING_CORS:-http://localhost:5173,http://localhost:5174}"
 
 cat > backend/.env << EOF

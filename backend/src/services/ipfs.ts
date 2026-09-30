@@ -10,6 +10,7 @@
 import crypto from "node:crypto";
 import fs from "node:fs";
 import { fileTypeFromBuffer } from "file-type";
+import { assertMalwareFree } from "./malwareScanner.js";
 import sharp from "sharp";
 import { PinataSDK } from "pinata";
 import * as pinManager from "./ipfs-pin-manager.js";
@@ -659,7 +660,11 @@ export async function pinJSON(
 const ALLOWED_IMAGE_MIME_SET = new Set<string>(config.ALLOWED_IMAGE_MIMES);
 
 const MALWARE_SIGNATURES: Array<{ name: string; pattern: RegExp }> = [
-  { name: "eicar", pattern: /X5O!P%@AP\[4\\PZX54\(P\^\)7CC\)7\}\$EICAR-STANDARD-ANTIVIRUS-TEST-FILE!\$H\+H\*/i },
+  {
+    name: "eicar",
+    pattern:
+      /X5O!P%@AP\[4\\PZX54\(P\^\)7CC\)7\}\$EICAR-STANDARD-ANTIVIRUS-TEST-FILE!\$H\+H\*/i,
+  },
   { name: "zip", pattern: /PK\x03\x04/ },
   { name: "rar", pattern: /Rar!\x1A\x07/ },
   { name: "sevenzip", pattern: /7z\xBC\xAF\x27\x1C/ },
@@ -722,6 +727,7 @@ export async function validateAndSanitizeImage(
   }
 
   scanBufferForMalware(buffer);
+  await assertMalwareFree(buffer);
 
   const metadata = await sharp(buffer, {
     animated: detectedMime === "image/gif",
@@ -963,10 +969,7 @@ export function verifyCidContent(cid: string, content: Buffer): boolean {
 
     const digest = crypto.createHash("sha256").update(content).digest();
     // Multihash: [0x12 = sha2-256][0x20 = 32 bytes length][32-byte digest]
-    const multihash = Buffer.concat([
-      Buffer.from([0x12, 0x20]),
-      digest,
-    ]);
+    const multihash = Buffer.concat([Buffer.from([0x12, 0x20]), digest]);
 
     // Encode multihash as base58btc
     let num = BigInt("0x" + multihash.toString("hex"));

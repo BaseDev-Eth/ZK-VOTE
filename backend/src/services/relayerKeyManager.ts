@@ -983,7 +983,7 @@ export class RelayerKeyManager {
     for (const key of this.keys.values()) {
       if (key.balanceXlm !== null) {
         relayerKeyBalance.set(
-          { key_id: key.id, public_key: key.publicKey, role: key.role },
+          { key_id: key.id, role: key.role },
           key.balanceXlm,
         );
       }
@@ -993,7 +993,7 @@ export class RelayerKeyManager {
           Math.floor((Date.now() - new Date(key.activatedAt).getTime()) / 1000),
         );
         relayerKeyAgeSeconds.set(
-          { key_id: key.id, public_key: key.publicKey },
+          { key_id: key.id },
           ageSec,
         );
       }
