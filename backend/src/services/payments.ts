@@ -29,6 +29,43 @@ export function getAsset(code: PaymentAsset): StellarSdk.Asset {
 }
 
 // MuxedAccount helper for high-volume inflow (one G... → many M...)
+// #540: each sponsored claimable-balance / M... destination locks 0.5 XLM
+// reserve on the sponsor account until claimed/reclaimed. Track it explicitly.
+export const CLAIMABLE_BALANCE_RESERVE_XLM = 0.5;
+export const MAX_MUXED_DESTINATIONS_PER_BATCH = 100;
+
+let sponsorshipReserveXlm = 0;
+
+export function getSponsorshipReserveXlm(): number {
+  return sponsorshipReserveXlm;
+}
+
+export function resetSponsorshipReserveForTests(): void {
+  sponsorshipReserveXlm = 0;
+}
+
+/** Pre-flight reserve check: sponsor must cover locked reserves + batch fees. */
+export async function checkSponsorshipReserve(newSponsorships: number): Promise<void> {
+  const { sponsorshipReserveXlm: gauge } = await import("./metrics.js");
+  gauge.set(sponsorshipReserveXlm);
+  const balances: any = await (horizonServer as any).loadAccount(relayerKeypair.publicKey()).catch(() => null);
+  const native = balances?.balances?.find((b: any) => b.asset_type === "native");
+  const available = native ? parseFloat(native.balance) - parseFloat(native.selling_liabilities || "0") : Number.MAX_SAFE_INTEGER;
+  const required = newSponsorships * CLAIMABLE_BALANCE_RESERVE_XLM;
+  if (Number.isFinite(available) && available < sponsorshipReserveXlm + required + 1) {
+    const { sponsorshipReserveDepletedTotal } = await import("./metrics.js");
+    sponsorshipReserveDepletedTotal.inc();
+    throw new Error(`Insufficient sponsorship reserve: have ${available} XLM, locked ${sponsorshipReserveXlm} XLM, need +${required} XLM`);
+  }
+}
+
+export function noteSponsorshipCreated(count = 1): void {
+  sponsorshipReserveXlm += count * CLAIMABLE_BALANCE_RESERVE_XLM;
+}
+
+export function noteSponsorshipReleased(count = 1): void {
+  sponsorshipReserveXlm = Math.max(0, sponsorshipReserveXlm - count * CLAIMABLE_BALANCE_RESERVE_XLM);
+}
 export function muxedForUser(base: string, id: string): string {
   const m = new StellarSdk.MuxedAccount(new StellarSdk.Account(base, "0"), id);
   // StellarSdk.MuxedAccount encodes to M...; fallback to base if not available
@@ -76,6 +113,9 @@ export async function sendPayment(op: PaymentOp): Promise<{ hash: string }> {
 export async function sendBatch(ops: PaymentOp[]): Promise<BatchResult> {
   if (ops.length === 0) throw new Error("No ops");
   if (ops.length > 100) throw new Error("Batch max 100 ops");
+  const muxedCount = ops.filter((o) => o.destination?.startsWith("M...") || o.destination?.startsWith("M")).length;
+  if (muxedCount > MAX_MUXED_DESTINATIONS_PER_BATCH) throw new Error("MuxedAccount limit exceeded");
+  await checkSponsorshipReserve(muxedCount);
   const idempotencyKey = `batch_${Date.now()}_${crypto.randomUUID()}`;
   const db = getDb();
   try {
@@ -91,6 +131,11 @@ export async function sendBatch(ops: PaymentOp[]): Promise<BatchResult> {
   await relayerKeyManager.signTransaction(tx);
   const res: any = await (horizonServer as any).submitTransaction(tx);
   log("info", "batch_sent", { ops: ops.length, hash: res.hash });
+  if (muxedCount > 0) {
+    noteSponsorshipCreated(muxedCount);
+    const { sponsorshipReserveXlm: gauge } = await import("./metrics.js");
+    gauge.set(getSponsorshipReserveXlm());
+  }
   return { hash: res.hash, ops: ops.length };
 }
 

@@ -730,3 +730,57 @@ export const daoReconciliationLastOk = new Gauge({
   registers: [register],
 });
 
+// ============================================
+// FIX BUNDLE #540/#541/#592/#593
+// ============================================
+
+export const sponsorshipReserveXlm = new Gauge({
+  name: "zkvote_sponsorship_reserve_xlm",
+  help: "XLM locked in claimable-balance/MuxedAccount sponsorship reserves (#540)",
+  registers: [register],
+});
+
+export const sponsorshipReserveDepletedTotal = new Counter({
+  name: "zkvote_sponsorship_reserve_depleted_total",
+  help: "Reserve-check rejections before depletion (#540)",
+  registers: [register],
+});
+
+export const unauthenticatedRejectionTotal = new Counter({
+  name: "zkvote_unauthenticated_rejection_total",
+  help: "Fake-registry / unauthenticated admin rejections (#592)",
+  labelNames: ["reason"] as const,
+  registers: [register],
+});
+
+export const crossTenantDenialTotal = new Counter({
+  name: "zkvote_cross_tenant_denial_total",
+  help: "Cross-tenant / registry-hash mismatch denials (#592)",
+  registers: [register],
+});
+
+export const reconciliationMismatchTotal = new Counter({
+  name: "zkvote_reconciliation_mismatch_total",
+  help: "Storage/rent reconciliation mismatches (#541)",
+  registers: [register],
+});
+
+export const batchPartialFailureTotal = new Counter({
+  name: "zkvote_batch_partial_failure_total",
+  help: "Partial batch failures (#540)",
+  registers: [register],
+});
+
+export const storageRentSavedXlm = new Counter({
+  name: "zkvote_storage_rent_saved_xlm_total",
+  help: "Estimated rent saved by Temporary/Instance storage design (#541)",
+  registers: [register],
+});
+
+export const sbtXssBlockedTotal = new Counter({
+  name: "zkvote_sbt_xss_blocked_total",
+  help: "SBT metadata XSS vectors blocked (#593)",
+  labelNames: ["vector"] as const,
+  registers: [register],
+});
+

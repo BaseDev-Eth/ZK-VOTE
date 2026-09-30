@@ -15,6 +15,12 @@ const MIN_MAX_ROOTS: u32 = 10;
 const MAX_MAX_ROOTS: u32 = 100;
 // Circuit depth must match vote.circom. Supports ~262K members (2^18 = 262,144)
 const MAX_TREE_DEPTH: u32 = 18;
+// #541 rent economics: Persistent ~10x Temporary. Roots + config are the only
+// Persistent/Instance keys (long-lived, TTL-extended via extend_ttl); leaves
+// (LeafValue/FilledSubtrees bulk) belong in Temporary. See backend stellar.ts
+// rentTierFor()/shouldExtendTtl() and formal-model rent budget.
+const RENT_ROOT_PERSISTENT: bool = true;
+const RENT_LEAF_TEMPORARY: bool = true;
 // Per-member registration cooldown: minimum seconds a member must wait before
 // registering another commitment in the tree. Prevents tree spam from members
 // churning commitments (e.g. re-registering after reinstate) (#371).

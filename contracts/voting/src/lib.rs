@@ -62,6 +62,11 @@ mod commit_reveal;
 
 const TREE_CONTRACT: Symbol = symbol_short!("tree");
 const REGISTRY: Symbol = symbol_short!("registry");
+// #592 per-DAO registry pin: voting must pin the expected dao-registry contract
+// hash (REG_PIN) + allowlisted registry id, and verify get_admin responses come
+// from the pinned registry. A fake registry returning admin=self is rejected.
+const REG_PIN: Symbol = symbol_short!("reg_pin");
+const REG_HASH_PIN: Symbol = symbol_short!("rgh_pin");
 const CIRCUIT_REGISTRY: Symbol = symbol_short!("circ_reg");
 const CIRCUIT_REGISTRY_ADMIN: Symbol = symbol_short!("cr_admin");
 const TRANSCRIPT_REGISTRY: Symbol = symbol_short!("tr_reg");
