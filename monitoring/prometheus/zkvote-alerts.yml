@@ -100,3 +100,30 @@ groups:
         annotations:
           summary: Batch partial failure rate elevated
           description: Elevated partial failures observed in multi-item batch execution.
+      - alert: ZKVoteRelayerBackupStale
+        expr: zkvote_backup_age_seconds > 93600
+        for: 15m
+        labels:
+          severity: critical
+          service: zkvote-relayer
+        annotations:
+          summary: No successful backup for over 26 hours
+          description: Backup age exceeds 26h; litestream/S3 replication or scheduled backups may be stalled. Verify litestream.yml sync and S3 backup.
+      - alert: ZKVoteRelayerRestoreDrillFailing
+        expr: sum(rate(zkvote_backup_restore_drill_total{status="error"}[15m])) > 0
+        for: 5m
+        labels:
+          severity: critical
+          service: zkvote-relayer
+        annotations:
+          summary: Encrypted restore drill failing
+          description: Restore drills are failing; backups may not be recoverable or forward secrecy check is tripping. Run backup:key-rotate drill and check key ring.
+      - alert: ZKVoteRelayerFeeSurge
+        expr: sum(rate(zkvote_rpc_errors_total{error_type=~"fee|congestion|surge"}[5m])) > 0.5
+        for: 5m
+        labels:
+          severity: warning
+          service: zkvote-relayer
+        annotations:
+          summary: Possible fee surge delaying vote inclusion
+          description: Fee/congestion RPC errors rising; surge-aware feeEstimator should be bumping priority fees. Check feeStats p99 spread and fee-bump queue.

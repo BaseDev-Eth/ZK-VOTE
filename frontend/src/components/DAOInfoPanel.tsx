@@ -23,6 +23,7 @@ import {
 } from "lucide-react";
 import defaultVK from "../lib/verification_key_soroban.json";
 import ProfileChangesModal from "./ProfileChangesModal";
+import { getExplorerUrl } from "../lib/utils";
 
 // Relayer URL for fetching events
 const RELAYER_URL = import.meta.env.VITE_RELAYER_URL || "http://localhost:3001";
@@ -629,7 +630,7 @@ export default function DAOInfoPanel({
             <p className="text-xs text-muted-foreground">
               View events on{" "}
               <a
-                href="https://stellar.expert"
+                href={getExplorerUrl("contract", String(daoId))}
                 target="_blank"
                 rel="noopener noreferrer"
                 className="text-primary hover:underline"

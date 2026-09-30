@@ -3,6 +3,7 @@
 Scope: current multi-tenant Soroban contracts (registry, membership-sbt, membership-tree, voting), JS relay, and Circom/Groth16 stack. Focus on relay/admin adversaries; users interact via a relayer to preserve anonymity.
 
 ## Actors & Trust
+
 - **Users (members)**: generate secrets locally; rely on relay for submission; do not trust relay with identity.
 - **Relay (honest-but-curious)**: sees request metadata but is expected not to tamper; cannot access user wallet keys.
 - **Relay (malicious)**: may drop/delay/reorder/alter submissions; holds its own key to sign transactions.
@@ -10,46 +11,56 @@ Scope: current multi-tenant Soroban contracts (registry, membership-sbt, members
 - **Chain validators**: assumed honest in execution; P25 host functions enforce cryptography.
 
 ## What Relays Learn / Can Do
+
 - **Can learn**: IP/headers/timing, daoId/proposalId/choice/nullifier/root/commitment/proof (from POST body), relayer account balance. Nullifier is per (dao, proposal), so a relay can link retries for the same vote but not map to a member without off-chain identifiers.
 - **Cannot learn**: member identity or secret; which leaf in tree corresponds to the proof; voter’s wallet address (relay pays fees).
 - **Can do (malicious)**: drop or delay submissions; replay the same payload (contract rejects reused nullifier); submit malformed tx to cause failure; front-run ordering of votes (tally unaffected because votes are additive); censor specific nullifiers by withholding.
 - **Cannot do (malicious)**: forge a different vote/choice without an updated proof (pairing check fails); bypass root/nullifier checks; cast votes without valid proof; read on-chain secrets (none stored).
 
 ## What Contract Admins Learn / Can Do
+
 - **Can learn**: proposal metadata, tallies, events (nullifier values are public on-chain), membership state they already manage. No access to secrets.
 - **Can do**: set/rotate VK for their DAO; create proposals; mint/revoke/reinstate SBTs via membership contracts; initialize tree params per DAO; emit events; pause new proposals by withholding VK; choose vote mode (Fixed/Trailing) when creating proposals.
 - **Cannot do**: see voter identities; override votes or edit tallies (no admin entrypoint); accept proofs without proper VK/root/nullifier checks; change VK for an existing proposal (vk_hash is snapshotted and enforced); bypass nullifier replay protection.
 - Nullifier domain separation: circuit expects `nullifier = H(secret, dao_id, proposal_id)`; on-chain storage keyed by `(dao_id, proposal_id, nullifier)` to prevent reuse across proposals/DAOs. Election identity is `(dao_id, proposal_id)` — never a flat global `NullifierUsed(hash)` map (issue #64). Legacy global entries, if any, migrate via `migrate_nullifier`. Backend nullifier queries must include both election IDs (`GET /nullifier/:daoId/:proposalId/:nullifier`).
 
 ## Code Alignment Checks (current repo)
+
 - `contracts/voting/src/lib.rs`: no admin override path; nullifier checked first; VK hash snapshotted per proposal; root checks enforce snapshot/trailing rules; proof verification bound to public signals (dao/proposal/root/nullifier/choice/commitment); set_vk gated by registry admin.
 - `contracts/membership-*`: SBT gating and tree registration restrict membership actions to admin + members per DAO; no entrypoints expose commitments or secrets beyond events with roots/nullifiers.
 - Backend: relay receives full vote payload and logs processing lines; does not require user keys; health/ready endpoints expose relayer address/contract IDs only when auth is provided; input validation guards hex/field bounds/all-zero proofs.
 
 ## Assumptions & Residual Risks
+
 - Users trust that relay will not log/link IPs to nullifiers; current code logs processing messages and returns detailed simulation errors (could correlate attempts).
 - Censorship is possible by a malicious relay (dropping votes) or admin (revoking members, withholding VK); anonymity remains but availability can be impacted.
 - Nullifiers are public on-chain; reuse across proposals/DAOs is prevented but nullifier values can be correlated by observers for the same proposal (expected).
+- **Nullifier Collision Risk (Issue #531)**: Current nullifier formula `Poseidon(secret, daoId, proposalId)` assumes `daoId` values are never reused. If a DAO is deleted and a new DAO reuses the same `daoId`, nullifier collisions could occur. Mitigation: (1) Avoid deleting DAOs, (2) Use large random daoId values, (3) Future fix will add epoch parameter. See `ISSUE_531_NULLIFIER_EPOCH_ANALYSIS.md` for detailed solution.
 - Timing/ordering leakage: observers (including relay) can see when votes land; no batching/cover traffic today.
 - Admin can select vote_mode to broaden eligibility (Trailing) or limit (Fixed); this is intentional but should be documented per proposal.
 
 ## Root History Eviction (MAX_ROOTS = 30)
+
 The membership-tree contract maintains a FIFO history of the last 30 Merkle roots per DAO. When membership changes occur (adds/removes), old roots are evicted.
 
 **Operational Impact:**
+
 - **Fixed mode**: Proposals store `eligible_root` at creation. If this root is evicted before all members vote, the `root_ok` check may fail even for eligible members. However, Fixed mode stores the root value directly in the proposal, so this primarily affects the contract's ability to verify the root is still in history.
 - **Trailing mode**: Proofs must use a root from the current history (last 30). Members who cached proofs with old roots will be unable to vote once their root is evicted.
 
 **Guidance for DAOs:**
+
 - DAOs with frequent membership changes (>30 changes during a proposal's voting period) may strand some voters.
 - Consider proposal duration vs. expected membership change rate.
 - Frontend should warn when root age approaches the eviction threshold and show the current anonymity set size to contextualize the risk.
 - For high-activity DAOs, consider shorter voting windows or coordinating membership changes.
 
 ## Fixed Mode Revocation Semantics (Intentional Behavior)
+
 In **Fixed mode**, a proposal's eligible root is snapshotted at proposal creation time. This has an important security implication:
 
 **Behavior**: A member who is revoked (SBT burned, commitment removed from tree) AFTER a Fixed-mode proposal is created can still vote on that proposal if:
+
 1. They cached a valid ZK proof generated before revocation
 2. The proof uses the `eligible_root` stored in the proposal
 3. Their nullifier hasn't been used
@@ -72,6 +83,7 @@ r = 2188824287183927522224640574525727508854836440041603434369820418657580849561
 **Why This Matters:**
 
 When public signals are converted to field elements (`Fr::from(x)`), values ≥ r are reduced modulo r. This creates a critical vulnerability:
+
 - If `nullifier = r + 1` is submitted, it's stored as `r + 1` in storage but verifies as `1` in the pairing check
 - An attacker could submit `nullifier = 1` for a second vote - different storage key but same proof verification
 - This bypasses double-vote protection
@@ -90,6 +102,7 @@ pub fn assert_in_field(env: &Env, value: &U256) {
 ```
 
 **Vote Circuit Public Signals (5 total):**
+
 1. `nullifier` - Must be non-zero AND < r
 2. `root` - Merkle tree root, must be < r
 3. `dao_id` - DAO identifier (u64, always < r)
@@ -103,11 +116,16 @@ The backend also validates field bounds before submitting to the contract. See `
 **Frontend Validation:**
 
 Use the validation helpers in `frontend/src/types/index.ts`:
+
 ```typescript
-import { assertValidFieldElement, assertValidNullifier, BN254_FR_MODULUS } from '@/types';
+import {
+  assertValidFieldElement,
+  assertValidNullifier,
+  BN254_FR_MODULUS,
+} from "@/types";
 
 // Validates value < BN254_FR_MODULUS
-assertValidFieldElement(root, 'root');
+assertValidFieldElement(root, "root");
 
 // Validates non-zero AND < BN254_FR_MODULUS
 assertValidNullifier(nullifier);
@@ -121,16 +139,19 @@ assertValidNullifier(nullifier);
 The client exposes `generateFakeZKCredentials()` (`frontend/src/lib/zk.ts`). This produces a structurally valid credential pair (random secret + salt → Poseidon commitment) that the voter can "reveal" to the coercer. The resulting ZK proof passes the circuit but is rejected on-chain because the fake commitment is not in the membership Merkle tree.
 
 **Properties:**
+
 - The coercer cannot distinguish a fake credential from a real one without access to the membership tree.
 - The voter's real credential (derived deterministically from their wallet signature) remains usable after the coercion ends.
-- Re-voting: because nullifiers are per `(dao_id, proposal_id)`, a voter who submitted a coerced vote with a *real* credential cannot vote again. Full JCJ coercion resistance requires a separate re-voting window; this implementation covers the fake-credential generation step only.
+- Re-voting: because nullifiers are per `(dao_id, proposal_id)`, a voter who submitted a coerced vote with a _real_ credential cannot vote again. Full JCJ coercion resistance requires a separate re-voting window; this implementation covers the fake-credential generation step only.
 
 **Residual Risks:**
+
 - If the coercer holds the voter's wallet, they can derive the real credential directly — fake credentials only help when the coercer asks the voter to "sign and show" rather than holding the device.
 - Full re-voting protection (latest vote overrides earlier) requires on-chain support not yet implemented.
 - A voter who panics and uses a fake credential still loses their effective vote (the nullifier slot for real credentials remains open, but they must re-vote with the real credential before the deadline).
 
 **Planned — Full JCJ Integration:**
+
 - Registrar-side filtering to strip fake-commitment votes from the tally.
 - Re-voting window so the real vote can override a coerced submission.
 - "Panic mode" UI button in `VoteModal` to switch to fake credentials before signing.
@@ -183,9 +204,9 @@ Grants require explicit Sybil mitigation for rewards; we enforce a **layered def
 #### 1. SBT-age gating (policy + optional on-chain window)
 
 - **Threat**: Attacker mints many SBTs immediately before proposal, votes, claims.
-- **Mitigation**: 
-  - *Policy*: DAO `membership_open = false` by default; admin vets members. For open DAOs, frontend + docs require **SBT age ≥ 7 days** before `proposal.created_at` to be eligible for rewards. Relayer can be configured to check `registry.get_dao` + `membership_sbt` mint timestamp (if available) and reject claims from fresh SBTs with `Sybil: SBT too recent`.
-  - *Future on-chain*: `membership_sbt` stores `MintedAt(dao_id, address) -> timestamp`; `rewards::claim` would require `now - minted_at >= MIN_SBT_AGE`. Not yet active to avoid breaking existing DAOs without timestamps; documented as next hardening.
+- **Mitigation**:
+  - _Policy_: DAO `membership_open = false` by default; admin vets members. For open DAOs, frontend + docs require **SBT age ≥ 7 days** before `proposal.created_at` to be eligible for rewards. Relayer can be configured to check `registry.get_dao` + `membership_sbt` mint timestamp (if available) and reject claims from fresh SBTs with `Sybil: SBT too recent`.
+  - _Future on-chain_: `membership_sbt` stores `MintedAt(dao_id, address) -> timestamp`; `rewards::claim` would require `now - minted_at >= MIN_SBT_AGE`. Not yet active to avoid breaking existing DAOs without timestamps; documented as next hardening.
 - **Residual**: If DAO keeps `membership_open = true` and `MIN_SBT_AGE = 0`, Sybil is higher — admin is advised to close membership or fund small pools (see funding caps).
 
 #### 2. Quadratic / funding caps (on-chain)
@@ -211,6 +232,7 @@ Funding caps are **per DAO** — compromise of one DAO treasury does not affect 
 With flat reward `R` and cap `C`, attacker needs `N = floor(C / R)` Sybil identities to drain pool. With `C = 1e6 * 1e7`, `R = 100 * 1e7`, `N = 10,000`. At `R=10` (smaller rewards), `N=100,000`. Combined with SBT-age + admin vetting, cost to create 10k vetted SBTs exceeds reward.
 
 Admin guidance per DAO (documented for frontend tooltip):
+
 - For high-value pools (>1M), set `membership_open=false` and vet members manually.
 - For open pools, set `R ≤ 50` and `C ≤ 100k * R`; monitor `ClaimedCount`.
 - Consider shortening proposal lifetime if membership churn >30 roots (eviction risk; see Root History).
@@ -235,9 +257,10 @@ Admin guidance per DAO (documented for frontend tooltip):
 Scope addition: on-chain homomorphic accumulation in `contracts/threshold-crypto`
 (`submit_analytic_contribution`, `analytics_aggregate`, `analytics_min_cohort`,
 `init_analytics`), backend service `backend/src/services/privacy-analytics.ts`
-+ `backend/src/routes/analytics.ts`, migration `004_add_privacy_analytics`, and
-frontend `AnalyticsPanel` (`frontend/src/components/AnalyticsPanel.tsx`,
-`analyticsCrypto.ts`, `frontend/src/queries/analyticsQueries.ts`).
+
+- `backend/src/routes/analytics.ts`, migration `004_add_privacy_analytics`, and
+  frontend `AnalyticsPanel` (`frontend/src/components/AnalyticsPanel.tsx`,
+  `analyticsCrypto.ts`, `frontend/src/queries/analyticsQueries.ts`).
 
 **Goal**: compute turnout / participation aggregates (e.g. how many members
 contributed to a round) **without leaking which member contributed** to indexers or
@@ -251,14 +274,14 @@ Analytics use an **ElGamal ciphertext over BN254 G1**. Each contributor submits
 per submission.
 
 - **Homomorphic accumulation (off-chain, tested)**: contributions are summed via
-  point addition so the stored value is always the *sum*
+  point addition so the stored value is always the _sum_
   `(Σ c1, Σ c2) = (R·G, (Σm)·G + R·Y)`. Any single intermediate sum is a valid
   encryption of the running total, never a contributor's own ciphertext, so an
   indexer reading the aggregate at any time learns nothing about any individual
   `m_i`. See `homomorphicAdd` / `thresholdDecryptAggregate` in
   `backend/src/services/privacy-analytics.ts`.
 - **On-chain register (tested, real host crypto)**: the threshold-crypto contract
-  holds the *aggregate only* and accumulates with the Soroban `bn254_g1_add` host
+  holds the _aggregate only_ and accumulates with the Soroban `bn254_g1_add` host
   function. It never stores per-contributor plaintext. A contributor may submit at
   most once per `(dao_id, round_id)`.
 - **Threshold decrypt of aggregate only**: there is no key enabling plaintext
@@ -282,18 +305,19 @@ aggregate of one or two contributions and thereby singling out a voter. Counts
 - **Contract admin**: can set/rotate the joint key and the cohort, but gains no
   plaintext linkage to a member unless a full threshold of shares colludes.
 - **Threshold collusion**: the standard risk applies — if `t` of `n` share-holders
-  collude, they can decrypt the *aggregate*. This leaks only `Σm`, not per-voter
+  collude, they can decrypt the _aggregate_. This leaks only `Σm`, not per-voter
   values, so the exposure is bounded to overall turnout.
 - **Double-counting**: prevented per contributor per round on-chain; off-chain the
   service replaces a prior round's row on re-submission for the same DAO.
 - **Residual**: the ElGamal discrete-log lookup for `Σm` (solving `x` where
   `x·G = Σm·G`) assumes `Σm` is small (bounded by cohort / DAO size), which holds
   because contributions are single-bit; the scheme deliberately does not try to
-  hide the *total count* from a threshold decryptor, only from indexers without a
+  hide the _total count_ from a threshold decryptor, only from indexers without a
   threshold. On-chain and off-chain homomorphic surfaces are independently tested
   against the same BN254 primitives.
 
 ## Next Hardening Steps
+
 - Relay: structured logging with redaction; configurable log retention; coarser error responses; optional cover traffic/backoff to reduce correlation; explicit anti-censorship monitoring (missing votes vs submissions).
 - Contracts: coarse error codes to avoid fine-grained leakage; optional per-contract versioning + upgrade events; ensure membership/admin checks stay isolated.
 - Ops: monitor relayer availability; document user guidance (do not mix identifiable transactions around anonymous voting).
@@ -301,6 +325,7 @@ aggregate of one or two contributions and thereby singling out a voter. Counts
 ## Post-Quantum Risk Assessment & Hybrid Defense Model (Issue #115)
 
 ### Quantum Threat Vectors to ZKVote Primitives
+
 Quantum computing presents two distinct threat paradigms for cryptographic systems:
 
 1. **Shor's Algorithm ($O(n^3)$ Polynomial Time Breakdown)**:
@@ -316,19 +341,22 @@ Quantum computing presents two distinct threat paradigms for cryptographic syste
 
 ### System Property Risk Matrix
 
-| System Property | Primitive Used | Quantum Vulnerability | Shor/Grover Risk Level | Hybrid / PQ Defense |
-| :--- | :--- | :--- | :--- | :--- |
-| **Vote Choice Confidentiality** | BN254 Groth16 Proof | Broken by Shor's algorithm | **CRITICAL (Long-term)** | Hybrid Hash Commitment + STARKs |
-| **Voter Anonymity / Leaf Privacy** | Poseidon Merkle Tree + BN254 | BN254 broken by Shor's; Poseidon ~128-bit PQ | **HIGH** | Post-Quantum SHA3 Merkle Layer |
-| **Double-Voting Prevention** | Nullifier Hash ($H(secret, dao, prop)$) | Dependent on Poseidon hash collision resistance | **LOW** | 256-bit PQ Nullifier ($H_{SHA3}$) |
-| **On-chain Tally Soundness** | Soroban Smart Contract Verification | Groth16 verifier broken by Shor's | **HIGH (Future)** | STARK / FRI Proof Verifier |
+| System Property                    | Primitive Used                          | Quantum Vulnerability                           | Shor/Grover Risk Level   | Hybrid / PQ Defense               |
+| :--------------------------------- | :-------------------------------------- | :---------------------------------------------- | :----------------------- | :-------------------------------- |
+| **Vote Choice Confidentiality**    | BN254 Groth16 Proof                     | Broken by Shor's algorithm                      | **CRITICAL (Long-term)** | Hybrid Hash Commitment + STARKs   |
+| **Voter Anonymity / Leaf Privacy** | Poseidon Merkle Tree + BN254            | BN254 broken by Shor's; Poseidon ~128-bit PQ    | **HIGH**                 | Post-Quantum SHA3 Merkle Layer    |
+| **Double-Voting Prevention**       | Nullifier Hash ($H(secret, dao, prop)$) | Dependent on Poseidon hash collision resistance | **LOW**                  | 256-bit PQ Nullifier ($H_{SHA3}$) |
+| **On-chain Tally Soundness**       | Soroban Smart Contract Verification     | Groth16 verifier broken by Shor's               | **HIGH (Future)**        | STARK / FRI Proof Verifier        |
 
 ### Hybrid Post-Quantum Commitment Scheme
+
 To protect votes cast today against quantum decryption decades in the future, ZKVote employs a **Hybrid PQ Commitment Layer**:
+
 - Alongside classical BN254 Poseidon commitments, each vote produces a **Quantum-Resistant Hash Commitment** $C_{PQ} = \text{SHA3-256}(secret \parallel salt \parallel dao\_id \parallel proposal\_id)$.
 - Information-theoretic hiding / preimage resistance of SHA3-256 is unaffected by Shor's algorithm, ensuring that recorded on-chain vote transcripts cannot be retroactively opened even if BN254 curve discrete log is solved.
 
 ### Post-Quantum Migration Strategy
+
 See [`docs/post-quantum-evaluation.md`](docs/post-quantum-evaluation.md) and [`docs/post-quantum-roadmap.md`](docs/post-quantum-roadmap.md) for the STARK circuit evaluation (Cairo/Miden vs Groth16) and multi-phase transition roadmap.
 
 - Coercion resistance: implement re-voting window and registrar tally filter (see #96).
@@ -385,6 +413,7 @@ See [`docs/post-quantum-evaluation.md`](docs/post-quantum-evaluation.md) and [`d
 a ZK proof and resubmit it through a different channel (different relayer or
 delayed resubmission) for strategic advantage. While the tally remains
 unaffected (votes are additive), voters may have preferences about:
+
 - Which relayer processes their vote (trust/latency)
 - Voting order (time-sensitive elections)
 - Proof reuse prevention (cross-relayer replay)
@@ -400,6 +429,7 @@ signal in the vote circuit (`vote.circom`) and 10th in the re-voting circuit
 5. **Proof verification fails** if `relayer_address` in circuit ≠ `actual_relayer_submitting`
 
 **Security properties**:
+
 - **Proof binding**: A proof generated with `relayer_address=A` cannot be
   resubmitted through relayer B; the pairing check will fail
 - **No nullifier pollution**: Nullifier remains deterministic per (voter, election),
@@ -410,11 +440,13 @@ signal in the vote circuit (`vote.circom`) and 10th in the re-voting circuit
   generating proofs; incorrect address causes vote rejection
 
 **What this prevents**:
+
 - ✅ Cross-relayer proof reuse
 - ✅ Selective front-running via relayer switching
 - ✅ Proof harvesting and replay by malicious observer
 
 **What this does NOT prevent**:
+
 - ❌ Front-running within a single relayer (still possible)
 - ❌ Censorship (relayer can still drop votes)
 - ❌ Ordering attacks if coordinated with proposer
@@ -426,16 +458,18 @@ No new privacy leakage: relayer addresses are already known from transaction
 signing.
 
 **Backward compatibility**: This is a breaking change:
+
 - Old 6-signal proofs (without relayer_address) will fail verification with
   new 7-signal verification keys
 - Clients must upgrade to new circuit version to generate compatible proofs
 - Old proofs are explicitly rejected by the new contract
 
 **Code changes**:
+
 - `circuits/vote.circom`: `signal input relayerAddress` added to template,
   included in public signals list
 - `circuits/vote_v2.circom`: Same changes for re-voting circuit (10 signals total)
-- `contracts/voting/src/lib.rs`: 
+- `contracts/voting/src/lib.rs`:
   - Constants: `NUM_PUBLIC_SIGNALS = 7`, `VOTE_CIRCUIT_IC_LEN = 8`
   - Error codes: `InvalidRelayerAddress = 69`, `RelayerMismatch = 70`
   - Helper: `address_to_u256()` converts address to field element
@@ -444,6 +478,7 @@ signing.
 - `backend/src/services/stellar.ts`: Extract relayer from keypair, pass to frontend
 
 **Deployment impact**:
+
 - New verification keys must be generated (IC vector length: 7 → 8)
 - Groth16 trusted setup must be rerun (new circuit, new parameters)
 - KAT (Known Answer Test) must validate circuit and on-chain match
@@ -456,7 +491,7 @@ identity commitment tied to an authenticated request (e.g. a signed wallet
 challenge), the admin/issuer observes the `(voter_identifier, commitment)`
 pair directly. Even though the commitment itself is later used unlinkably
 inside the ZK proof (per the "What Relays Learn" section above), the
-*registration* step itself leaks the mapping to whoever operates the
+_registration_ step itself leaks the mapping to whoever operates the
 issuer, defeating anonymity for anyone who trusts that operator less than
 they trust "the protocol".
 
@@ -468,7 +503,7 @@ calls out:
 1. The voter blinds their commitment with a fresh random blinding factor
    before sending it to the issuer: `blinded = commitment * r^e mod n`.
 2. The issuer authenticates the voter (via whatever eligibility check is
-   already in place) and signs the *blinded* value — it never sees the
+   already in place) and signs the _blinded_ value — it never sees the
    real commitment.
 3. The voter unblinds the returned signature locally, obtaining a valid
    issuer signature over their original, never-disclosed commitment.
@@ -516,7 +551,7 @@ that limits rogue VK swaps:
 2. **Approval Phase**: Multiple independent approvers (multi-sig) must each
    submit `approve_vk_upgrade` transactions. The contract tracks approval
    count. The proposal only becomes executable once `approvals >=
-   required_approvals`.
+required_approvals`.
 
 3. **Timelock Phase**: After quorum is met, the proposal enters a mandatory
    timelock period (`execute_after`). During this period, the proposal can be
@@ -538,6 +573,7 @@ that limits rogue VK swaps:
    keys.
 
 **Properties**:
+
 - No single admin can unilaterally rotate the VK.
 - DAO members have a timelock window to detect and respond to malicious
   proposals.
@@ -547,6 +583,7 @@ that limits rogue VK swaps:
   countdown and approval progress.
 
 **Code alignment**:
+
 - `contracts/circuit-registry/src/lib.rs`: `propose_vk_upgrade`,
   `approve_vk_upgrade`, `execute_vk_upgrade`, `cancel_vk_upgrade`,
   `get_vk_proposal`, `get_dao_vk_proposal`, `VkProposal`/`VkProposalStatus`
@@ -560,8 +597,10 @@ that limits rogue VK swaps:
 ## Groth16 MPC Toxic Waste Transcript Verification & On-Chain TranscriptRegistry Gating
 
 ### Threat Analysis: Single-Laptop Setup Toxic Waste & Proof Forgery
+
 Groth16 zk-SNARK security relies strictly on the destruction of the secret trapdoor elements ($\tau, \alpha, \beta, \gamma, \delta$) generated during the structured reference string (SRS) ceremony.
 In an unmitigated "single-laptop setup", a single ceremony runner evaluates Phase 2 parameters locally:
+
 - **Toxic Waste Retention**: The operator retains the evaluation scalar $\tau$.
 - **Proof Forgery Capability**: Knowing $\tau$, the operator can calculate polynomial quotient evaluations directly without satisfying R1CS constraints.
 - **Impact on 262k Merkle Set**: An attacker can fabricate arbitrary Groth16 proofs proving inclusion of arbitrary unminted commitments within the 262,144-leaf anonymity tree without possessing valid secrets or membership SBTs.
@@ -592,4 +631,3 @@ In an unmitigated "single-laptop setup", a single ceremony runner evaluates Phas
    - State-machine verification in `formal-model/TranscriptRegistry.tla` formally proves:
      - `UnattestedVKNeverActive`: An unattested verification key can never be set as active in voting.
      - `MinContributorsEnforced`: No transcript with $< 3$ contributors can ever be verified.
-

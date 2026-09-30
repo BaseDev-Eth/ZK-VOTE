@@ -230,18 +230,29 @@ export function useWallet() {
     persistConnectionIntent(false);
     clearAllStores();
 
+    // Clear all identity and cryptographic secrets from localStorage
+    const secretKeyPatterns = [
+      "zkvote_hd_master_secret",
+      "identity_secret",
+      "private_key",
+      "secret",
+      "mnemonic",
+    ];
+
     // Clear all Stellar Wallets Kit localStorage entries
     // The library stores data with keys prefixed with "SWK" or containing "stellar"
     try {
       if (typeof window !== "undefined" && window.localStorage) {
         Object.keys(localStorage).forEach((key) => {
+          const keyLower = key.toLowerCase();
           if (
             key.startsWith("SWK") ||
-            key.toLowerCase().includes("stellar") ||
-            key.toLowerCase().includes("wallet") ||
-            key.toLowerCase().includes("freighter") ||
-            key.toLowerCase().includes("albedo") ||
-            key.toLowerCase().includes("xbull")
+            keyLower.includes("stellar") ||
+            keyLower.includes("wallet") ||
+            keyLower.includes("freighter") ||
+            keyLower.includes("albedo") ||
+            keyLower.includes("xbull") ||
+            secretKeyPatterns.some((pattern) => keyLower.includes(pattern.toLowerCase()))
           ) {
             localStorage.removeItem(key);
           }

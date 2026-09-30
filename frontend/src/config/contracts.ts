@@ -1,5 +1,11 @@
 // Deployed contract addresses and network configuration
 // Auto-generated on Fri  3 Apr 2026 00:43:03 BST
+//
+// Issue #556 — single config source: rpcUrl is now sourced from env.ts so
+// that VITE_SOROBAN_RPC_URL can override it at build time without touching
+// this file.  Import SOROBAN_RPC_URL from "./env" if you need the raw string.
+
+import { SOROBAN_RPC_URL } from "./env";
 
 export const CONTRACTS = {
   REGISTRY_ID: "CBGK5YFR5544QNHUNR4WKB5ECL75DAY3R4M5UNALA42ZBPKOFNL5RM43",
@@ -8,22 +14,20 @@ export const CONTRACTS = {
   VOTING_ID: "CCYGWEUNWOBHJ6JIHDMTK2XSSDVMQ7ZGBJQE6QR2VYD4FRQGZR5EYKJ2",
   COMMENTS_ID: "CCUZNVADC24GEOPRD5A6PBCZGOQ6QOKJU6E5UBXI6RKDC7AWN5ATXNFF",
   // Treasury holds USDC/EURC for high-volume payouts (real, no mocks)
-  TREASURY_ID:
-    (import.meta.env.VITE_TREASURY_CONTRACT_ID as string) ||
-    "CTREASURYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYY",
-  // Thin rewards crate (Vote-to-Earn) — generated via REWARDS_CONTRACT_ID env or fallback mock for tests
-  REWARDS_ID:
-    (import.meta.env.VITE_REWARDS_CONTRACT_ID as string) ||
-    "CRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRR",
+  // Empty when unset — placeholder C… strings are rejected by guardrails (#646)
+  TREASURY_ID: (import.meta.env.VITE_TREASURY_CONTRACT_ID as string) || "",
+  // Thin rewards crate (Vote-to-Earn)
+  REWARDS_ID: (import.meta.env.VITE_REWARDS_CONTRACT_ID as string) || "",
 } as const;
 
 export const ASSET_ISSUERS = {
-  USDC: (import.meta.env.VITE_USDC_ISSUER as string) || "GDZRIUTGHMQNRPGPB5JJYX6DCWKEZ3NDJNNB455VTMP7ZZAVDDXTCGQO",
-  EURC: (import.meta.env.VITE_EURC_ISSUER as string) || "GAML6VH2XIYLO23TT3G5ANIBDNZJCMBWYLN3OOUMTL42NF467AIXAU6F",
+  USDC: (import.meta.env.VITE_USDC_ISSUER as string) || "GXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX",
+  EURC: (import.meta.env.VITE_EURC_ISSUER as string) || "GXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX",
 } as const;
 
 export const NETWORK_CONFIG = {
-  rpcUrl: "https://soroban-testnet.stellar.org",
+  // Sourced from VITE_SOROBAN_RPC_URL env var (issue #556 — no more hardcode).
+  rpcUrl: SOROBAN_RPC_URL,
   networkPassphrase: "Test SDF Network ; September 2015",
   networkName: "testnet",
 } as const;

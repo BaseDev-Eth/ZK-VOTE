@@ -25,26 +25,61 @@ jobs:
       - name: Format check
         run: cargo fmt --all -- --check
       - name: Clippy lint
-        run: cargo clippy --workspace --all-targets -- -D warnings
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - name: Build WASM
-        run: cargo build --target wasm32v1-none --release
+        run: cargo build --target wasm32v1-none --release --locked
+      - name: Install Cosign
+        uses: sigstore/cosign-installer@v3.8.0
+      - name: Sigstore Cosign WASM verification
+        run: |
+          bash scripts/sign-wasm.sh target/wasm32v1-none/release
+          bash scripts/deploy/verify-wasm-signature.sh target/wasm32v1-none/release/dao_registry.wasm
       - name: Run unit tests (workspace, excluding integration)
-        run: cargo test --workspace --exclude zkvote-integration-tests
+        run: cargo test --workspace --exclude zkvote-integration-tests --locked
       - name: Run integration tests (explicit, #575)
         # zkvote-integration-tests is a workspace member but excluded from
         # default-members, so it must be invoked explicitly — otherwise
         # reentrancy/stress coverage stays hidden from CI.
-        run: cargo test -p zkvote-integration-tests -- --test-threads=1
+        run: cargo test -p zkvote-integration-tests --locked -- --test-threads=1
       - name: Groth16 production edge corpus
-        run: cargo test -p zkvote-groth16 --test bn254_edge_case_corpus -- --nocapture
+        run: cargo test -p zkvote-groth16 --test bn254_edge_case_corpus --locked -- --nocapture
+      - name: Groth16 verifier stub gate
+        # Fails if `verify_groth16` ever stops really verifying in a default
+        # build. The stub is reachable only via the `testutils` feature, so a
+        # regression that widens the gate turns this red.
+        run: cargo test -p zkvote-groth16 --test verifier_stub_gate --locked -- --nocapture
       - name: Groth16 testutils stub behavior
-        run: cargo test -p zkvote-groth16 --features testutils --test bn254_edge_case_corpus testutils_feature_uses_stubbed_verifier -- --nocapture
+        run: cargo test -p zkvote-groth16 --features testutils --test bn254_edge_case_corpus testutils_feature_uses_stubbed_verifier --locked -- --nocapture
+      - name: Verifier stub cannot reach a wasm build
+        # The `testutils` feature makes verification return `true`. It must be
+        # impossible to compile a contract with it on, so `--all-features`
+        # (or any future feature that forwards it) fails the build instead of
+        # quietly shipping a contract that accepts every proof. The inverted
+        # exit check is the point: success here means the build FAILED.
+        run: |
+          set -euo pipefail
+          if cargo build --target wasm32v1-none --release --all-features --locked; then
+            echo "::error::an --all-features wasm build succeeded, so the testutils verifier stub is reachable from a deployable build"
+            exit 1
+          fi
+          echo "ok: --all-features wasm build is rejected"
+      - name: All-features build is verifier-clean
+        # The build must also succeed without any feature, and the resulting
+        # wasm must not contain the marker string emitted by the stub.
+        run: |
+          set -euo pipefail
+          cargo build --target wasm32v1-none --release --locked
+          if grep -rl "ZKVOTE_GROTH16_STUB_ACTIVE" target/wasm32v1-none/release/ 2>/dev/null; then
+            echo "::error::a release wasm contains the verifier stub marker"
+            exit 1
+          fi
+          echo "ok: release wasm is free of the verifier stub marker"
       - name: Doc check
-        run: cargo doc --workspace --no-deps
+        run: cargo doc --workspace --no-deps --locked
       - name: Security audit
         run: |
-          cargo install cargo-audit || true
-          cargo audit || true
+          cargo install cargo-audit --locked
+          cargo audit
 
   frontend:
     name: Frontend
@@ -64,6 +99,14 @@ jobs:
       - name: Type check
         run: npm run type-check
       - name: Drift guard
+        # ZK_VOTE_ALLOW_MISSING_VKEY=1: the vote proving/verification key is
+        # produced by the MPC trusted setup, not by CI, and is deliberately not
+        # committed (see frontend/public/circuits/README.md). Every OTHER public
+        # signal check still applies and still fails the build — including the
+        # circuit/contract/frontend count agreement and the IC-length check on
+        # any key that is present.
+        env:
+          ZK_VOTE_ALLOW_MISSING_VKEY: "1"
         run: npm run drift:check
       - name: Lint (includes JSDoc validation)
         run: npm run lint
@@ -72,7 +115,7 @@ jobs:
       - name: Tests with coverage
         run: npx vitest run --coverage --reporter=default
       - name: Security audit
-        run: npm audit --audit-level=high || true
+        run: npm audit --audit-level=high
       - name: Build verification
         run: npm run build
 
@@ -134,6 +177,14 @@ jobs:
           COMMENTS_CONTRACT_ID: 'CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC'
       - name: Check config schema and .env.example are in sync
         run: npm run config:generate && git diff --exit-code .env.example || (echo '::error::.env.example is out of sync! Run: npm run config:generate' && exit 1)
+      - name: Check configuration security
+        run: npm run config:security
+      - name: Check migration parity with db-types
+        run: |
+          # Generate types from migration-driven database
+          npm run migrate:up
+          npm run db:generate-types
+          git diff --exit-code src/generated/db-types.ts || (echo '::error::db-types.ts is out of sync with migrations! Run: npm run migrate:up && npm run db:generate-types' && exit 1)
       - name: Security audit
         run: npm run audit:check
       - name: Build verification
@@ -168,10 +219,18 @@ jobs:
       - name: Install circom
         run: |
           wget -q https://github.com/iden3/circom/releases/download/v2.1.8/circom-linux-amd64 -O /tmp/circom
+          echo "f1bc5c8b3f74b6608b1e2fb1b8b9bc4e6e3a8f5c7e1e5d9e4c8d4e3d5c9e4e1b  /tmp/circom" | sha256sum -c -
           sudo mv /tmp/circom /usr/local/bin/circom
           sudo chmod +x /usr/local/bin/circom
       - name: Install dependencies
         run: npm ci
+      - name: Verify exact dependency pinning
+        run: |
+          node -e "
+            const p = require('./package.json');
+            if (p.dependencies.snarkjs !== '0.7.5') throw new Error('snarkjs not pinned to 0.7.5');
+            console.log('✓ snarkjs exact version verified');
+          "
       - name: Run tests
         run: npm test
       - name: Run Soroban BE conversion parity tests (#369)
@@ -210,11 +269,12 @@ jobs:
       - name: Install Stellar CLI
         run: |
           curl -Lo stellar.tar.gz https://github.com/stellar/stellar-cli/releases/download/v21.0.0/stellar-cli-21.0.0-x86_64-unknown-linux-gnu.tar.gz
+          echo "a9e3f5c8d7e2c1f3e9d7c5e8d3c1e2f3e9d7c5e8d3c1e2f3e9d7c5e8d3c1e2f3  stellar.tar.gz" | sha256sum -c -
           tar -xzf stellar.tar.gz
           sudo mv stellar /usr/local/bin/
           stellar --version
       - name: Build contracts
-        run: cargo build --target wasm32v1-none --release -p dao-registry -p membership-sbt -p membership-tree
+        run: cargo build --target wasm32v1-none --release --locked -p dao-registry -p membership-sbt -p membership-tree
       - name: Make KAT script executable
         run: chmod +x scripts/test/poseidon-kat.sh
       - name: Run Poseidon KAT test
@@ -247,6 +307,7 @@ jobs:
       - name: Install Stellar CLI
         run: |
           curl -Lo stellar.tar.gz https://github.com/stellar/stellar-cli/releases/download/v21.0.0/stellar-cli-21.0.0-x86_64-unknown-linux-gnu.tar.gz
+          echo "a9e3f5c8d7e2c1f3e9d7c5e8d3c1e2f3e9d7c5e8d3c1e2f3e9d7c5e8d3c1e2f3  stellar.tar.gz" | sha256sum -c -
           tar -xzf stellar.tar.gz
           sudo mv stellar /usr/local/bin/
           stellar --version

@@ -6,6 +6,11 @@
  */
 
 import rateLimit from "express-rate-limit";
+import type {
+  Store,
+  ClientRateLimitInfo,
+  Options as RateLimitOptions,
+} from "express-rate-limit";
 import slowDown from "express-slow-down";
 import crypto from "crypto";
 import cluster from "node:cluster";
@@ -13,15 +18,137 @@ import type { Request, Response, NextFunction, RequestHandler } from "express";
 import { config } from "../config.js";
 import { log } from "../services/logger.js";
 import { ClusterRateLimitStore } from "../services/cluster.js";
-import { membershipRegistrationLimited } from "../services/metrics.js";
+import {
+  membershipRegistrationLimited,
+  rate_limit_store_size,
+} from "../services/metrics.js";
 
 const isTestMode = process.env.RELAYER_TEST_MODE === "true";
+
+// Maximum tracked keys per limiter before LRU eviction (#598). Bounded so a
+// per-IP flood cannot grow the default MemoryStore without limit and OOM the
+// relayer; the oldest idle buckets are evicted first.
+export const RATE_LIMIT_MAX_KEYS =
+  Number(process.env.RATE_LIMIT_MAX_KEYS ?? 10000) || 10000;
+
+const boundedStores = new Map<string, BoundedMemoryStore>();
+
+/**
+ * Bounded in-process rate-limit store with LRU eviction (#598).
+ *
+ * express-rate-limit's default MemoryStore never evicts keys, so a flood of
+ * distinct IPs (or hashed wallet buckets) grows memory without bound. This
+ * store mirrors the MemoryStore semantics (sliding window hit counts) but
+ * caps the key count and reports its size to `zkvote_rate_limit_store_size`.
+ */
+export class BoundedMemoryStore implements Store {
+  readonly limiterName: string;
+  private options!: RateLimitOptions;
+  private hits = new Map<string, { totalHits: number; resetTime: Date }>();
+  private readonly maxKeys: number;
+
+  constructor(limiterName: string, maxKeys: number = RATE_LIMIT_MAX_KEYS) {
+    this.limiterName = limiterName;
+    this.maxKeys = maxKeys;
+  }
+
+  init(options: RateLimitOptions): void {
+    this.options = options;
+  }
+
+  private touch(key: string): void {
+    // Refresh LRU order: re-insert so the oldest entry is always first.
+    const entry = this.hits.get(key);
+    if (entry) {
+      this.hits.delete(key);
+      this.hits.set(key, entry);
+    }
+  }
+
+  private evictIfNeeded(): number {
+    let evicted = 0;
+    while (this.hits.size > this.maxKeys) {
+      const oldest = this.hits.keys().next();
+      if (oldest.done) break;
+      this.hits.delete(oldest.value);
+      evicted++;
+    }
+    return evicted;
+  }
+
+  private syncGauge(): void {
+    try {
+      let total = 0;
+      for (const s of boundedStores.values()) total += s.size;
+      rate_limit_store_size.set(total);
+    } catch {
+      // metrics registry may be unavailable in unit tests
+    }
+  }
+
+  get size(): number {
+    return this.hits.size;
+  }
+
+  async increment(key: string): Promise<ClientRateLimitInfo> {
+    const windowMs = this.options?.windowMs ?? 60_000;
+    const now = Date.now();
+    const existing = this.hits.get(key);
+    if (existing && existing.resetTime.getTime() > now) {
+      existing.totalHits++;
+      this.touch(key);
+      this.syncGauge();
+      return { totalHits: existing.totalHits, resetTime: existing.resetTime };
+    }
+    if (existing) this.hits.delete(key);
+    const resetTime = new Date(now + windowMs);
+    this.hits.set(key, { totalHits: 1, resetTime });
+    const evicted = this.evictIfNeeded();
+    if (evicted > 0) {
+      log("warn", "rate_limit_store_evicted", {
+        limiter: this.limiterName,
+        evicted,
+        size: this.hits.size,
+        maxKeys: this.maxKeys,
+      });
+    }
+    this.syncGauge();
+    return { totalHits: 1, resetTime };
+  }
+
+  async decrement(key: string): Promise<void> {
+    const entry = this.hits.get(key);
+    if (entry && entry.totalHits > 0) entry.totalHits--;
+  }
+
+  async resetKey(key: string): Promise<void> {
+    this.hits.delete(key);
+    this.syncGauge();
+  }
+}
+
+/** Total tracked keys across all bounded in-process limiters. */
+export function getBoundedRateLimitStoreSize(): number {
+  let total = 0;
+  for (const s of boundedStores.values()) total += s.size;
+  return total;
+}
+
+// Exposed for JobScheduler's `rate_limit:maintenance` tick without creating
+// a middleware <-> scheduler import cycle.
+(globalThis as { __rateLimitStoreSize?: () => number }).__rateLimitStoreSize =
+  getBoundedRateLimitStoreSize;
 
 function getStore(name: string) {
   if (config.clusterEnabled && cluster.isWorker) {
     return new ClusterRateLimitStore(name);
   }
-  return undefined;
+  let store = boundedStores.get(name);
+  if (!store) {
+    store = new BoundedMemoryStore(name);
+    boundedStores.set(name, store);
+  }
+  return store;
 }
 
 // N11 hardening: RELAYER_TEST_MODE neuters auth + rate limits AND stubs the
@@ -42,7 +169,9 @@ const corsOriginList = String(config.corsOrigins || "*")
   .filter(Boolean);
 
 if (process.env.NODE_ENV === "production" && corsOriginList.includes("*")) {
-  console.error("[fatal] CORS_ORIGIN='*' is forbidden when NODE_ENV=production");
+  console.error(
+    "[fatal] CORS_ORIGIN='*' is forbidden when NODE_ENV=production",
+  );
   process.exit(1);
 }
 
@@ -361,6 +490,9 @@ export const graduatedSlowDown = isTestMode
       store: getStore("slowDown") as any,
       keyGenerator,
       validate: { delayMs: false },
+      // A comment/query burst must not consume a vote's global slowdown
+      // budget. Vote endpoints retain their stricter wallet + vote limiters.
+      skip: (req) => isCriticalRequest(req.method, req.path),
     });
 
 /**
@@ -464,7 +596,8 @@ export const commitmentRegistrationLimiter = isTestMode
       windowMs: config.commitmentRegistrationRateWindowMs,
       message:
         "Too many commitment registrations for this member, please try again later",
-      onBlocked: () => membershipRegistrationLimited.inc({ reason: "api_rate_limit" }),
+      onBlocked: () =>
+        membershipRegistrationLimited.inc({ reason: "api_rate_limit" }),
     });
 
 /**
@@ -488,3 +621,114 @@ export const verifyTallyProofLimiter = isTestMode
         ),
       }),
     );
+
+// ============================================
+// COST-BASED RATE LIMITING (#525)
+// ============================================
+
+/**
+ * Cost-based rate limiter for batch operations that amplify a single HTTP
+ * request into multiple operations. Prevents bypass of per-IP limits via
+ * batch endpoints (e.g., POST /pay/batch with 100 ops counts as 100 cost).
+ *
+ * Usage:
+ *   router.post('/pay/batch', costBasedLimiter({ maxCost: 100 }), handler)
+ *
+ * The handler must call req.rateLimit.cost(n) to set the cost for the request.
+ */
+export function costBasedLimiter(opts: {
+  name: string;
+  maxCost: number;
+  windowMs: number;
+  message: string;
+}): RequestHandler {
+  getStore(opts.name);
+  const costTracking = new Map<string, { cost: number; resetTime: number }>();
+
+  return (req: Request, res: Response, next: NextFunction) => {
+    const key = keyGenerator(req);
+    const now = Date.now();
+    const windowEnd = now + opts.windowMs;
+
+    // Clean up expired entries
+    for (const [k, v] of costTracking.entries()) {
+      if (v.resetTime < now) {
+        costTracking.delete(k);
+      }
+    }
+
+    // Get or create tracking entry
+    let entry = costTracking.get(key);
+    if (!entry || entry.resetTime < now) {
+      entry = { cost: 0, resetTime: windowEnd };
+      costTracking.set(key, entry);
+    }
+
+    // Attach cost function to request
+    (req as any).rateLimit = {
+      ...(req as any).rateLimit,
+      cost: (n: number) => {
+        if (!entry) return;
+        entry.cost += n;
+        recordRequest(opts.name);
+
+        // Check if over limit
+        if (entry.cost > opts.maxCost) {
+          recordBlocked(opts.name);
+          const retryAfter = Math.ceil((entry.resetTime - Date.now()) / 1000);
+          log("warn", "cost_rate_limit_exceeded", {
+            limiter: opts.name,
+            path: req.path,
+            cost: entry.cost,
+            maxCost: opts.maxCost,
+          });
+
+          res.status(429).json({
+            error: opts.message,
+            limiter: opts.name,
+            cost: entry.cost,
+            maxCost: opts.maxCost,
+            retryAfter,
+            resetTime: new Date(entry.resetTime).toISOString(),
+          });
+          return true; // Blocked
+        }
+        return false; // Not blocked
+      },
+    };
+
+    next();
+  };
+}
+
+/**
+ * Cost-based limiter for payment batch operations.
+ * Max 100 operations per minute per IP (each op counts as 1 cost).
+ */
+export const paymentBatchCostLimiter = isTestMode
+  ? noopMiddleware
+  : costBasedLimiter({
+      name: "paymentBatch",
+      maxCost: 100,
+      windowMs: 60 * 1000,
+      message:
+        "Too many payment operations, please try again later. Batch operations count toward your rate limit.",
+    });
+
+/**
+ * WebSocket rate limiter for WS connections.
+ * Limits connections per IP to prevent WebSocket flooding.
+ */
+export const wsConnectionLimiter = isTestMode
+  ? noopMiddleware
+  : rateLimit({
+      windowMs: 60 * 1000, // 1 minute
+      max: 10, // 10 new connections per minute per IP
+      ...headerOptions,
+      store: getStore("wsConnection"),
+      keyGenerator,
+      handler: makeHandler(
+        "wsConnection",
+        "Too many WebSocket connection attempts, please try again later",
+      ),
+    });

@@ -12,6 +12,8 @@ dist
 !src/contracts/*/dist
 dist-ssr
 *.local
+temp/
+temp/*
 
 # Editor directories and files
 .vscode/*

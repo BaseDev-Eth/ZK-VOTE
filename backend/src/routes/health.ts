@@ -6,9 +6,27 @@
  */
 
 import { Router, Request, Response } from "express";
+import { timingSafeEqual } from "node:crypto";
 import type * as StellarSdk from "@stellar/stellar-sdk";
 import { config } from "../config.js";
 import { extractAuthToken } from "../middleware/auth.js";
+
+/** Constant-time token comparison to prevent timing attacks on health endpoints. */
+function safeTokenMatch(supplied: string | undefined, expected: string | undefined): boolean {
+  if (!supplied || !expected) return false;
+  const bufA = Buffer.from(supplied);
+  const bufB = Buffer.from(expected);
+  if (bufA.length !== bufB.length) {
+    // Pad to same length so timingSafeEqual doesn't throw
+    const len = Math.max(bufA.length, bufB.length);
+    const padA = Buffer.alloc(len);
+    const padB = Buffer.alloc(len);
+    bufA.copy(padA);
+    bufB.copy(padB);
+    return timingSafeEqual(padA, padB) && bufA.length === bufB.length;
+  }
+  return timingSafeEqual(bufA, bufB);
+}
 import { getRateLimitMetrics } from "../middleware/rateLimit.js";
 import { bodyLimit } from "../middleware/index.js";
 import { getMembershipVerificationMetrics } from "../services/sync.js";
@@ -36,6 +54,7 @@ import {
   markUnavailable,
 } from "../services/service-health.js";
 import { getSupervisor } from "../services/supervisor.js";
+import { healthEndpointStatus } from "../services/metrics.js";
 import v8 from "node:v8";
 import fs from "node:fs";
 import os from "node:os";
@@ -138,7 +157,7 @@ router.get("/healthz", async (req: Request, res: Response) => {
 
   if (config.healthExposeDetails) {
     const token = extractAuthToken(req);
-    if (token === config.relayerAuthToken) {
+    if (safeTokenMatch(token, config.relayerAuthToken)) {
       response.services = services;
       response.memory = {
         rssMb: Math.round(memory.rss / 1024 / 1024),
@@ -203,7 +222,7 @@ router.get("/health", async (req: Request, res: Response) => {
   // Only expose details if auth token provided
   if (config.healthExposeDetails) {
     const token = extractAuthToken(req);
-    if (token === config.relayerAuthToken) {
+    if (safeTokenMatch(token, config.relayerAuthToken)) {
       base.relayer = relayerKeyManager.getPublicKey() || relayerPublicKey;
       base.relayerKeys = relayerKeyManager.getKeyHealth();
       base.votingContract = config.votingContractId;
@@ -224,7 +243,14 @@ router.get("/health", async (req: Request, res: Response) => {
     markDegraded("sqlite", (err as Error).message);
   }
 
-  res.json(base);
+  // Issue #556 — health 503 degraded: return the correct HTTP status so
+  // load-balancers and k8s probes can act on the degraded state instead of
+  // silently keeping traffic flowing to an unhealthy instance.
+  const httpStatus = services.status === "ok" ? 200 : 503;
+  // Record the HTTP status as a Prometheus gauge so Grafana can alert when
+  // the value deviates from 200 (config drift / service degradation).
+  healthEndpointStatus.set(httpStatus);
+  res.status(httpStatus).json(base);
 });
 
 /**
@@ -263,7 +289,7 @@ router.get("/readyz", async (req: Request, res: Response) => {
 
     if (config.healthExposeDetails) {
       const token = extractAuthToken(req);
-      if (token === config.relayerAuthToken) {
+      if (safeTokenMatch(token, config.relayerAuthToken)) {
         base.details = {
           rpc: rpcStatus,
           db: dbHealth,
@@ -313,7 +339,7 @@ router.get("/ready", async (req: Request, res: Response) => {
 
     if (config.healthExposeDetails) {
       const token = extractAuthToken(req);
-      if (token === config.relayerAuthToken) {
+      if (safeTokenMatch(token, config.relayerAuthToken)) {
         base.relayer = relayerPublicKey;
         base.votingContract = config.votingContractId;
         base.treeContract = config.treeContractId;
@@ -338,7 +364,7 @@ router.get("/ready", async (req: Request, res: Response) => {
 router.get("/services", async (req: Request, res: Response) => {
   if (config.healthExposeDetails) {
     const token = extractAuthToken(req);
-    if (token !== config.relayerAuthToken) {
+    if (!safeTokenMatch(token, config.relayerAuthToken)) {
       return res.status(401).json({ error: "Unauthorized" });
     }
   }
@@ -378,7 +404,7 @@ router.get("/config", (_req: Request, res: Response) => {
 router.get("/log/metrics", async (req: Request, res: Response) => {
   if (config.healthExposeDetails) {
     const token = extractAuthToken(req);
-    if (token !== config.relayerAuthToken) {
+    if (!safeTokenMatch(token, config.relayerAuthToken)) {
       return res.status(401).json({ error: "Unauthorized" });
     }
   }
@@ -404,7 +430,7 @@ router.get("/db/stats", async (req: Request, res: Response) => {
   // Require auth token for detailed diagnostics
   if (config.healthExposeDetails) {
     const token = extractAuthToken(req);
-    if (token !== config.relayerAuthToken) {
+    if (!safeTokenMatch(token, config.relayerAuthToken)) {
       // Return basic stats without diagnostics
       try {
         const dbStatus = getDbStatus();
@@ -455,7 +481,7 @@ router.post(
  */
 router.get("/debug/heap", async (req: Request, res: Response) => {
   const token = extractAuthToken(req);
-  if (!config.relayerAuthToken || token !== config.relayerAuthToken) {
+  if (!config.relayerAuthToken || !safeTokenMatch(token, config.relayerAuthToken)) {
     return res.status(401).json({ error: "Unauthorized" });
   }
 
@@ -488,6 +514,12 @@ router.get("/debug/heap", async (req: Request, res: Response) => {
  * Issue #387
  */
 router.get("/relay-test", async (req: Request, res: Response) => {
+  // Auth-gate: this endpoint exposes relayer public key, sequence numbers,
+  // contract IDs, RPC pool URLs, and DB internals — all sensitive.
+  const token = extractAuthToken(req);
+  if (!safeTokenMatch(token, config.relayerAuthToken)) {
+    return res.status(401).json({ error: "Unauthorized" });
+  }
   const startTime = Date.now();
   const results: {
     timestamp: string;
@@ -672,7 +704,7 @@ router.get("/sequence/health", async (req: Request, res: Response) => {
     // Include detailed info if authenticated
     if (config.healthExposeDetails) {
       const token = extractAuthToken(req);
-      if (token === config.relayerAuthToken) {
+      if (safeTokenMatch(token, config.relayerAuthToken)) {
         Object.assign(response, {
           lastKnownSequence: health.lastKnownSequence,
         });

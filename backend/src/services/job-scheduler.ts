@@ -18,6 +18,7 @@ import {
   daoReconciliationRunsTotal,
   daoReconciliationLastOk,
   serviceLastRunTime,
+  backupAgeSeconds,
 } from "./metrics.js";
 
 const logger = createLogger("job-scheduler");
@@ -96,6 +97,7 @@ export class JobScheduler {
 
       // 3. Update gauge metrics
       const rateLimitKeys = this.updateStoreMetrics();
+      this.updateBackupAge();
 
       // 4. State reconciliation check
       this.checkStateReconciliation();
@@ -142,13 +144,48 @@ export class JobScheduler {
   }
 
   /**
-   * Inspect and update rate limit metrics
+   * Inspect and update rate limit metrics (#598).
+   *
+   * Previously hardcoded to 0, so `zkvote_rate_limit_store_size` never moved
+   * and the exhaustion alert could not fire. Now sums the bounded in-process
+   * limiter stores (best-effort: middleware may not be loaded in all contexts).
    */
   updateStoreMetrics(): number {
-    // Basic approximate count of active rate limit buckets
-    const count = 0;
-    rate_limit_store_size.set(count);
+    let count = 0;
+    try {
+      // Dynamic import path avoided to keep scheduler free of middleware
+      // cycles; resolve via the global registry when available.
+      const g = globalThis as { __rateLimitStoreSize?: () => number };
+      if (typeof g.__rateLimitStoreSize === "function") {
+        count = g.__rateLimitStoreSize();
+      }
+    } catch {
+      count = 0;
+    }
+    try {
+      rate_limit_store_size.set(count);
+    } catch {
+      // metrics registry may be unavailable in unit tests
+    }
     return count;
+  }
+
+  /**
+   * Track backup staleness for the DR alert (#600). Age is derived from the
+   * backup module's last-success timestamp when available; unknown stays put
+   * so the alert only fires on measured staleness.
+   */
+  updateBackupAge(): void {
+    try {
+      const g = globalThis as { __lastBackupAt?: () => string | null };
+      const at = typeof g.__lastBackupAt === "function" ? g.__lastBackupAt() : null;
+      if (at) {
+        const ageSec = Math.max(0, (Date.now() - Date.parse(at)) / 1000);
+        backupAgeSeconds.set(ageSec);
+      }
+    } catch {
+      // metrics registry may be unavailable in unit tests
+    }
   }
 
   /**

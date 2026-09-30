@@ -121,6 +121,14 @@ const ALWAYS_REDACT = new Set([
   "signature",
   "authorization",
   "x-relayer-auth",
+  // Identity / ballot fields — normalizeFieldKey strips separators (#644)
+  "choice",
+  "votechoice",
+  "walletaddress",
+  "voterpublickey",
+  "votersignature",
+  "publickey",
+  "idempotencykey",
 ]);
 
 /**

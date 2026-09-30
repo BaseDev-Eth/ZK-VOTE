@@ -8,7 +8,12 @@
  */
 
 import cluster from "node:cluster";
-import express, { type Express, type Request, type Response, type NextFunction } from "express";
+import express, {
+  type Express,
+  type Request,
+  type Response,
+  type NextFunction,
+} from "express";
 import cors from "cors";
 import helmet from "helmet";
 
@@ -20,6 +25,7 @@ import swaggerUi from "swagger-ui-express";
 import { ServiceSupervisor } from "./services/supervisor.js";
 import { closeDb } from "./services/db.js";
 import { buildOpenApiDocument } from "./openapi.js";
+import { priorityMiddleware } from "./priority/priorityMiddleware.js";
 
 import {
   startClusterMaster,
@@ -149,6 +155,37 @@ const services = buildAppServices();
 
 const app: Express = express();
 
+const isProduction = process.env.NODE_ENV === "production";
+
+// Security: CORS configuration
+function parseCorsOrigins(value: string | string[]): string[] {
+  if (Array.isArray(value)) return value;
+  return value
+    .split(",")
+    .map((origin) => origin.trim())
+    .filter(Boolean);
+}
+
+const allowedCorsOrigins = parseCorsOrigins(config.corsOrigins as unknown as string | string[]);
+
+if (allowedCorsOrigins.length === 0) {
+  throw new Error("CORS_ORIGIN must specify at least one origin");
+}
+
+if (isProduction && allowedCorsOrigins.includes("*")) {
+  throw new Error(
+    "CORS_ORIGIN must not be '*' in production; configure exact origins",
+  );
+}
+
+for (const origin of allowedCorsOrigins) {
+  if (origin !== "*" && /[*?]/.test(origin)) {
+    throw new Error(
+      "CORS_ORIGIN origins must be exact URLs, not wildcard patterns",
+    );
+  }
+}
+
 // Security: HTTP headers with CSP
 // This is a pure JSON API (no HTML is served outside /api-docs), so the CSP
 // defaults everything to 'none' and only opens the handful of directives
@@ -167,7 +204,7 @@ app.use(
         objectSrc: ["'none'"],
         baseUri: ["'none'"],
         formAction: ["'none'"],
-        frameAncestors: ["'none'"],
+        frameAncestors: allowedCorsOrigins.includes("*") ? ["'none'"] : allowedCorsOrigins,
         blockAllMixedContent: [],
         upgradeInsecureRequests: [],
       },
@@ -198,6 +235,16 @@ app.use((_req, res, next) => {
   next();
 });
 
+// CRITICAL (#661): Cross-origin isolation headers for timing-masking to be effective.
+// Timing masking in proof generation only works when the page is crossOriginIsolated,
+// which requires COOP + COEP headers from the server (dev/preview server has these
+// in vite.config.ts, but production must send them too).
+app.use((_req, res, next) => {
+  res.setHeader("Cross-Origin-Opener-Policy", "same-origin");
+  res.setHeader("Cross-Origin-Embedder-Policy", "require-corp");
+  next();
+});
+
 // Prevent caching of sensitive, non-static API responses. Kept scoped to the
 // routes that return per-user or per-vote data rather than applied globally,
 // since some routes (e.g. /api-docs, /ipfs/image/:cid) are fine to cache.
@@ -215,38 +262,13 @@ const noStore = (
 // Metrics middleware (before other middleware to capture all requests)
 app.use(metricsMiddleware);
 
+// Reserve vote capacity before global throttling or any route mount. The
+// classifier normalizes /, /api/v1, and /api/v2 so every public mount gets
+// the same vote-over-comment scheduling guarantee.
+app.use(priorityMiddleware());
+
 // Request-scoped degradation tracking (#204)
 app.use(degradationContext);
-
-// Security: CORS configuration
-function parseCorsOrigins(value: string | string[]): string[] {
-  if (Array.isArray(value)) return value;
-  return value
-    .split(",")
-    .map((origin) => origin.trim())
-    .filter(Boolean);
-}
-
-const allowedCorsOrigins = parseCorsOrigins(config.corsOrigins as unknown as string | string[]);
-const isProduction = process.env.NODE_ENV === "production";
-
-if (allowedCorsOrigins.length === 0) {
-  throw new Error("CORS_ORIGIN must specify at least one origin");
-}
-
-if (isProduction && allowedCorsOrigins.includes("*")) {
-  throw new Error(
-    "CORS_ORIGIN must not be '*' in production; configure exact origins",
-  );
-}
-
-for (const origin of allowedCorsOrigins) {
-  if (origin !== "*" && /[*?]/.test(origin)) {
-    throw new Error(
-      "CORS_ORIGIN origins must be exact URLs, not wildcard patterns",
-    );
-  }
-}
 
 const allowAllCors = !isProduction && allowedCorsOrigins.includes("*");
 
@@ -321,7 +343,10 @@ app.get("/csrf-token", (_req, res) => {
 // ============================================
 
 // Initialize routes that need dependencies
-initHealthRoutes(services.stellar.server, services.stellar.relayerKeypair.publicKey());
+initHealthRoutes(
+  services.stellar.server,
+  services.stellar.relayerKeypair.publicKey(),
+);
 initIndexerRoutes(triggerDaoMembershipSync);
 
 // Mount route handlers (metrics first, before CSRF/auth middleware)

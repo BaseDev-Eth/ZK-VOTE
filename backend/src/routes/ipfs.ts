@@ -9,6 +9,7 @@ import { createHash } from "node:crypto";
 import { Router, type Request, type Response } from "express";
 import multer from "multer";
 import sharp from "sharp";
+import { fileTypeFromBuffer } from "file-type";
 
 import { config, LIMITS, ALLOWED_IMAGE_MIMES } from "../config.js";
 import { log } from "../services/logger.js";
@@ -35,7 +36,12 @@ import {
   enqueueDegradedWrite,
   drainIpfsPinQueue,
 } from "../services/service-health.js";
-import { detectMimeType } from "../utils/magic-bytes.js";
+import {
+  detectMimeType,
+  hasSafeImageDimensions,
+  validationLock,
+} from "../utils/magic-bytes.js";
+import { assertMalwareFree } from "../services/malwareScanner.js";
 
 const router = Router();
 
@@ -65,6 +71,7 @@ router.use(["/ipfs/:cid", "/ipfs/image/:cid"], (req, res, next) => {
 // ============================================
 
 const MAX_IMAGE_DIMENSION = 4096;
+const MAX_IMAGE_PIXELS = MAX_IMAGE_DIMENSION * MAX_IMAGE_DIMENSION;
 
 const ALLOWED_IMAGE_MIME_SET = new Set<string>(ALLOWED_IMAGE_MIMES);
 
@@ -161,7 +168,10 @@ interface ProcessedImage {
   hash: string;
 }
 
-function invalidUpload(message: string, code: string): Error & { code: string } {
+function invalidUpload(
+  message: string,
+  code: string,
+): Error & { code: string } {
   const err = new Error(message) as Error & { code: string };
   err.code = code;
   return err;
@@ -181,13 +191,23 @@ async function processImageUpload(file: {
     );
   }
 
-  const detectedMime = detectMimeType(file.buffer);
-  if (!detectedMime || !isAllowedImageMime(detectedMime)) {
+  const magicMime = detectMimeType(file.buffer);
+  const libraryType = await fileTypeFromBuffer(file.buffer);
+  if (!magicMime || !libraryType || !isAllowedImageMime(libraryType.mime)) {
     throw invalidUpload(
-      `File content is not a supported image (detected: ${detectedMime || "unknown"}).`,
+      `File content is not a supported image (detected: ${libraryType?.mime || magicMime || "unknown"}).`,
       "INVALID_FILE_TYPE",
     );
   }
+
+  if (magicMime !== libraryType.mime) {
+    throw invalidUpload(
+      `Image detectors disagreed (${magicMime} vs ${libraryType.mime}).`,
+      "MIME_MISMATCH",
+    );
+  }
+
+  const detectedMime = libraryType.mime;
 
   if (detectedMime !== declaredMime) {
     throw invalidUpload(
@@ -204,9 +224,23 @@ async function processImageUpload(file: {
     );
   }
 
+  await assertMalwareFree(file.buffer);
+
+  if (
+    !hasSafeImageDimensions(file.buffer, MAX_IMAGE_DIMENSION, MAX_IMAGE_PIXELS)
+  ) {
+    throw invalidUpload(
+      `Image dimensions exceed maximum allowed ${MAX_IMAGE_DIMENSION}x${MAX_IMAGE_DIMENSION}.`,
+      "IMAGE_DIMENSIONS_EXCEEDED",
+    );
+  }
+
   let metadata;
   try {
-    metadata = await sharp(file.buffer, { failOn: "error" }).metadata();
+    metadata = await sharp(file.buffer, {
+      failOn: "error",
+      limitInputPixels: MAX_IMAGE_PIXELS,
+    }).metadata();
   } catch {
     throw invalidUpload("Unable to read image metadata.", "INVALID_IMAGE");
   }
@@ -225,12 +259,18 @@ async function processImageUpload(file: {
 
   let sanitizedBuffer: Buffer;
   try {
-    sanitizedBuffer = await sharp(file.buffer, { failOn: "error" })
+    sanitizedBuffer = await sharp(file.buffer, {
+      failOn: "error",
+      limitInputPixels: MAX_IMAGE_PIXELS,
+    })
       .rotate()
       .withMetadata(false)
       .toBuffer();
   } catch {
-    throw invalidUpload("Image sanitization failed.", "IMAGE_SANITIZATION_FAILED");
+    throw invalidUpload(
+      "Image sanitization failed.",
+      "IMAGE_SANITIZATION_FAILED",
+    );
   }
 
   const sanitizedThreats = scanFileForThreats({
@@ -436,23 +476,34 @@ router.post(
         (req as any).auth?.sub ??
         "authenticated";
 
-      const processed = await processImageUpload(req.file);
+      const initialHash = createHash("sha256")
+        .update(req.file.buffer)
+        .digest("hex");
 
-      log("info", "ipfs_upload_image", {
-        filename: req.file.originalname,
-        originalSize: req.file.size,
-        size: processed.buffer.length,
-        mimetype: processed.mimeType,
-        width: processed.width,
-        height: processed.height,
-        hash: processed.hash,
-        uploader,
-      });
+      const { processed, result } = await validationLock.acquire(
+        initialHash,
+        async () => {
+          const p = await processImageUpload(req.file!);
 
-      const result = await ipfsService.pinFile(
-        processed.buffer,
-        req.file.originalname,
-        processed.mimeType,
+          log("info", "ipfs_upload_image", {
+            filename: req.file!.originalname,
+            originalSize: req.file!.size,
+            size: p.buffer.length,
+            mimetype: p.mimeType,
+            width: p.width,
+            height: p.height,
+            hash: p.hash,
+            uploader,
+          });
+
+          const r = await ipfsService.pinFile(
+            p.buffer,
+            req.file!.originalname,
+            p.mimeType,
+          );
+
+          return { processed: p, result: r };
+        },
       );
 
       log("info", "ipfs_upload_success", {

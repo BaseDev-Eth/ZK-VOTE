@@ -145,8 +145,8 @@ SECRET=$(echo $COMMITMENT_DATA | jq -r '.secret')
 SALT=$(echo $COMMITMENT_DATA | jq -r '.salt')
 COMMITMENT=$(echo $COMMITMENT_DATA | jq -r '.commitment')
 
-echo "   Secret: ${SECRET:0:20}..."
-echo "   Salt: ${SALT:0:20}..."
+echo "   Secret: [REDACTED]"
+echo "   Salt: [REDACTED]"
 echo "   Commitment: ${COMMITMENT:0:30}..."
 
 # Register commitment on-chain using self_register (with test key)

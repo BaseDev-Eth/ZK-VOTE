@@ -4,10 +4,42 @@ echo "Running pre-commit checks..."
 
 STAGED=$(git diff --cached --name-only --diff-filter=ACM)
 
-# Format Rust code — only when Rust sources are staged, and only when the
-# toolchain is available. Previously this ran on every commit and aborted
-# (exit 1) even when cargo was simply not installed, blocking unrelated
-# e.g. backend-only commits with "Rust code not formatted".
+# Secret Scanner: Block committed secret key patterns (SDKA... / S[A-Z2-7]{55} secret seeds)
+echo "→ Checking for committed secrets..."
+SECRET_LEAK=0
+for file in $STAGED; do
+    if [ -f "$file" ]; then
+        # Match SDKA... pattern or any S followed by 55 base32 characters (including actual leaked keys)
+        if git diff --cached "$file" | grep -E '\+.*(SDKA[A-Z0-9]{52}|S[A-Z2-7]{55})' | grep -vE 'SXXXXXXX|REPLACE_ME|placeholder|example'; then
+            echo "ERROR: Hardcoded secret key detected in $file! Replace with a placeholder before committing."
+            SECRET_LEAK=1
+        fi
+    fi
+done
+
+if [ "$SECRET_LEAK" -ne 0 ]; then
+    echo "Commit aborted due to potential secret leakage."
+    exit 1
+fi
+echo "✓ Secret scan OK"
+
+# Database File Scanner: Block committed *.db files (Issue #535)
+echo "→ Checking for database files..."
+DB_LEAK=0
+for file in $STAGED; do
+    if echo "$file" | grep -qE '\.(db|db-wal|db-shm)$'; then
+        echo "ERROR: Database file detected: $file. Database files must not be committed to git."
+        DB_LEAK=1
+    fi
+done
+
+if [ "$DB_LEAK" -ne 0 ]; then
+    echo "Commit aborted due to database file leakage."
+    exit 1
+fi
+echo "✓ Database file scan OK"
+
+# Format Rust code — only when Rust sources are staged
 if echo "$STAGED" | grep -qE '\.rs$|(^|/)Cargo\.(toml|lock)$'; then
     if command -v cargo >/dev/null 2>&1; then
         echo "→ Checking Rust formatting..."
@@ -17,7 +49,6 @@ if echo "$STAGED" | grep -qE '\.rs$|(^|/)Cargo\.(toml|lock)$'; then
         fi
         echo "✓ Rust formatting OK"
 
-        # Run Rust clippy (warnings only, don't block)
         echo "→ Running Rust clippy..."
         cargo clippy --workspace --quiet || true
     else
@@ -38,16 +69,15 @@ if echo "$STAGED" | grep -q "^frontend/"; then
     echo "✓ Frontend lint OK"
 fi
 
-# Lint backend if changes in backend/ and lint script exists.
-# The repo-wide `npm run lint` (eslint . && tsc --noEmit) type-checks EVERY
-# backend file, so it fails on unrelated sources and cannot verify this
-# commit. Pre-commit must gate what is actually being committed, so lint
-# exactly the staged backend files instead.
+# Lint backend if changes in backend/
 if echo "$STAGED" | grep -q "^backend/"; then
     if grep -q '"lint"' backend/package.json 2>/dev/null; then
-        echo "→ Linting backend staged files..."
-        cd backend
-        FAILED=0
-        for file in $(echo "$STAGED" | grep '^backend/.*\.ts$' | sed 's|^backend/||'); do
-            # Respect the project's eslint ignore zones
-            case "$file" in 
+        echo "→ Linting backend..."
+        cd backend && npm run lint --silent || {
+            echo "ERROR: Backend lint failed."
+            exit 1
+        }
+        cd ..
+        echo "✓ Backend lint OK"
+    fi
+fi

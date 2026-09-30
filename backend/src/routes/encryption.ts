@@ -261,6 +261,7 @@ router.get(
 /** Store an encrypted proposal or comment body. */
 router.put(
   `${BASE}/daos/:daoId/content/:contentType/:contentId`,
+  authGuard,
   commentLimiter,
   validateParams(contentParams),
   validateBody(envelopeSchema),

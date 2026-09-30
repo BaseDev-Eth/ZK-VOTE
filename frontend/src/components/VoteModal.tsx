@@ -37,6 +37,17 @@ interface VoteModalProps {
    * default — means the election uses the default circuit (#93).
    */
   merkleDepth?: number;
+  /**
+   * Candidate count bound into the vote circuit public signals.
+   * Must match on-chain `ElectionConfig.num_candidates` (#645).
+   *
+   * Leave undefined to have this component read the value the contract will
+   * verify against (`get_effective_num_candidates`), which is the only way to
+   * be sure the two agree. A hardcoded default of 2 silently disagrees with any
+   * election that configured a different count. Pass a value only when the
+   * caller already knows it.
+   */
+  numCandidates?: number;
   daoId: number;
   publicKey: string;
   kit: StellarWalletsKit | null;
@@ -52,6 +63,7 @@ export default function VoteModal({
   voteMode,
   vkVersion: _vkVersion,
   merkleDepth = 0,
+  numCandidates,
   daoId,
   publicKey,
   kit,
@@ -217,6 +229,25 @@ export default function VoteModal({
       // Step 4b: Generate ZK proof
       setProgress("Generating zero-knowledge proof...");
 
+      // The circuit constrains `voteChoice < numCandidates` against this PUBLIC
+      // signal, and the contract verifies the proof with the same value. It
+      // cannot be omitted: at 0 the constraint is unsatisfiable and no witness
+      // exists.
+      //
+      // The contract is the source of truth — it knows the configured count and
+      // floors at 2 for a binary ballot. A caller-supplied `numCandidates` prop
+      // wins when provided, so a caller that already knows the value does not
+      // pay for the read.
+      let effectiveNumCandidates = numCandidates;
+      if (effectiveNumCandidates === undefined) {
+        const numCandidatesResult =
+          await clients.voting.get_effective_num_candidates({
+            dao_id: BigInt(daoId),
+            proposal_id: BigInt(proposalId),
+          });
+        effectiveNumCandidates = numCandidatesResult.result;
+      }
+
       const proofInput: ProofInput = {
         // Public signals
         root: root.toString(),
@@ -224,7 +255,10 @@ export default function VoteModal({
         daoId: daoId.toString(),
         proposalId: proposalId.toString(),
         voteChoice: choice ? "1" : "0",
-        relayerAddress: "0",
+        // Must match on-chain ElectionConfig.num_candidates. The contract is
+        // the source of truth; a caller-supplied `numCandidates` prop wins when
+        // provided.
+        numCandidates: effectiveNumCandidates.toString(),
         commitment: commitment.toString(), // Private input - computed in circuit, not exposed publicly
         // Note: vkVersion is NOT a circuit signal - it's checked on-chain only
         // Private signals
@@ -259,7 +293,7 @@ export default function VoteModal({
 
       if (!isValid) {
         throw new Error(
-          "Proof verification failed locally! This indicates a bug in proof generation.",
+          "Local proof verification failed. Circuit artifacts may be missing or mismatched (check /circuits/vote.wasm and verification_key.json), or the witness may be incomplete.",
         );
       }
 
@@ -303,47 +337,8 @@ export default function VoteModal({
         timestamp: Date.now(),
       } as VotePayload & { redundantProof?: unknown };
 
-      // Sign the vote payload with the voter's Stellar keypair
-      let voterSignature: string | undefined;
-      try {
-        setProgress("Signing vote with your wallet...");
-        const { signVotePayload } = await import("../services/freighter");
-        const { getFreighterNetworkDetails } =
-          await import("../services/freighter");
-        const networkDetails = await getFreighterNetworkDetails();
-        const networkPassphrase =
-          networkDetails?.networkPassphrase ||
-          "Public Global Stellar Network ; September 2015";
-
-        const payloadToSign = JSON.stringify({
-          daoId: Number(daoId),
-          proposalId: Number(proposalId),
-          choice,
-          nullifier: toHexBE(nullifier),
-          root: toHexBE(root),
-          timestamp: Date.now(),
-        });
-        voterSignature = await signVotePayload(
-          payloadToSign,
-          publicKey,
-          networkPassphrase,
-        );
-
-        if (import.meta.env.DEV) {
-          console.log("Vote payload signed:", {
-            signature: voterSignature.slice(0, 16) + "...",
-          });
-        }
-      } catch (err) {
-        console.warn("Failed to sign vote payload:", err);
-        // Continue without signature - backend will still accept it with relayer auth token
-      }
-
-      votePayload = {
-        ...votePayload,
-        voterPublicKey: publicKey,
-        voterSignature,
-      };
+      // Do not attach voterPublicKey / voterSignature — that links the wallet
+      // to the nullifier and ballot in transit and in localStorage (#644).
 
       // Step 7: Deduplication check — if this nullifier is already in the
       // queue as submitted or conflict, surface that to the user.
@@ -366,7 +361,7 @@ export default function VoteModal({
         }
       }
 
-      // Optimistic update — show success UI before the network round-trip
+      // Optimistic tally preview — reverted if submission does not land
       const revertOptimisticUpdate = setOptimisticVote(
         daoId,
         proposalId,
@@ -386,43 +381,55 @@ export default function VoteModal({
         return;
       }
 
-      // Step 9: Attempt immediate submission via queue processor
+      // Step 9: Await submission — only show success when the relay accepts (#646)
       setProgress("Submitting anonymous vote through relay...");
-      setStep("success");
+      setStep("submitting");
+
+      await processEntry(entry);
+
+      const finalEntry =
+        submissionQueue.getState().entries[votePayload.nullifier];
+
+      if (finalEntry?.status === "submitted") {
+        if (finalEntry.txHash) {
+          addReceipt({
+            txHash: finalEntry.txHash,
+            nullifier: votePayload.nullifier,
+            timestamp: Date.now(),
+            daoId: Number(daoId),
+            proposalId: Number(proposalId),
+          });
+        }
+        clearPendingVote(daoId, proposalId);
+        setStep("success");
+        onComplete();
+        return;
+      }
+
+      if (finalEntry?.status === "conflict") {
+        revertOptimisticUpdate();
+        setStep("error");
+        setError(
+          finalEntry.conflictDetail ||
+            "You have already voted on this proposal.",
+        );
+        return;
+      }
+
+      if (finalEntry?.status === "failed") {
+        revertOptimisticUpdate();
+        setStep("error");
+        setError(
+          finalEntry.lastError ||
+            "Vote submission failed. Please try again.",
+        );
+        return;
+      }
+
+      // pending / retryable — keep optimistic preview, show queued UI
+      setIsOfflineQueued(false);
+      setStep("queued");
       onComplete();
-
-      // Submit in background via the queue processor
-      processEntry(entry)
-        .then(() => {
-          // Read final state from the queue
-          const finalEntry = submissionQueue.getState().entries[votePayload.nullifier];
-          if (!finalEntry) return;
-
-          if (finalEntry.status === "submitted") {
-            if (finalEntry.txHash) {
-              addReceipt({
-                txHash: finalEntry.txHash,
-                nullifier: votePayload.nullifier,
-                timestamp: Date.now(),
-                daoId: Number(daoId),
-                proposalId: Number(proposalId),
-              });
-            }
-            clearPendingVote(daoId, proposalId);
-          } else if (finalEntry.status === "conflict") {
-            // Conflict: this nullifier was already used.
-            // The SubmissionQueueBanner will surface the conflict notification.
-            revertOptimisticUpdate();
-          } else if (finalEntry.status === "failed") {
-            // Permanent failure
-            revertOptimisticUpdate();
-          }
-          // For "pending" (retryable): leave optimistic update in place,
-          // the queue processor will retry automatically.
-        })
-        .catch(() => {
-          // processEntry never throws — errors are recorded in the queue entry
-        });
     } catch (err) {
       setStep("error");
       let errorMsg =

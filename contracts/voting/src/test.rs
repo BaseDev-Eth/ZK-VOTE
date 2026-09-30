@@ -1,6 +1,12 @@
 use super::*;
 use soroban_sdk::{testutils::Address as _, testutils::Ledger as _, Env, String};
 
+// The crate is `#![no_std]`; `std::panic::catch_unwind` is needed so a single
+// test can assert that a call is rejected *and* then inspect the state it left
+// behind (e.g. "the weighted tally is still zero"). `#[should_panic]` can only
+// assert the panic, not the aftermath.
+extern crate std;
+
 // Mock tree contract
 mod mock_tree {
     use soroban_sdk::{contract, contractimpl, contracttype, Address, Env, U256};
@@ -171,6 +177,11 @@ mod mock_transcript_registry {
     pub enum DataKey {
         AttestedVk(BytesN<32>),
         Attestation(BytesN<32>, BytesN<32>),
+        /// When true, every hash is attested unless explicitly revoked.
+        /// Set by the shared test harness so a test about voting mechanics is
+        /// not also a test about MPC ceremony bookkeeping; the tests that *are*
+        /// about attestation turn it off first.
+        AttestAll,
     }
 
     #[contract]
@@ -178,6 +189,10 @@ mod mock_transcript_registry {
 
     #[contractimpl]
     impl MockTranscriptRegistry {
+        pub fn set_attest_all(env: Env, on: bool) {
+            env.storage().persistent().set(&DataKey::AttestAll, &on);
+        }
+
         pub fn set_attested(env: Env, vk_hash: BytesN<32>, attested: bool) {
             env.storage()
                 .persistent()
@@ -196,9 +211,16 @@ mod mock_transcript_registry {
         }
 
         pub fn is_vk_attested(env: Env, vk_hash: BytesN<32>) -> bool {
+            if let Some(explicit) = env
+                .storage()
+                .persistent()
+                .get::<_, bool>(&DataKey::AttestedVk(vk_hash))
+            {
+                return explicit;
+            }
             env.storage()
                 .persistent()
-                .get(&DataKey::AttestedVk(vk_hash))
+                .get(&DataKey::AttestAll)
                 .unwrap_or(false)
         }
 
@@ -207,9 +229,16 @@ mod mock_transcript_registry {
             transcript_hash: BytesN<32>,
             vk_hash: BytesN<32>,
         ) -> bool {
+            if let Some(explicit) = env
+                .storage()
+                .persistent()
+                .get::<_, bool>(&DataKey::Attestation(transcript_hash, vk_hash))
+            {
+                return explicit;
+            }
             env.storage()
                 .persistent()
-                .get(&DataKey::Attestation(transcript_hash, vk_hash))
+                .get(&DataKey::AttestAll)
                 .unwrap_or(false)
         }
     }
@@ -222,9 +251,19 @@ fn setup_env_with_registry() -> (Env, Address, Address, Address, Address, Addres
     let registry_id = env.register(mock_registry::MockRegistry, ());
     let sbt_id = env.register(mock_sbt::MockSbt, ());
     let tree_id = env.register(mock_tree::MockTree, ());
+    // Transcript registry: `set_vk` refuses a key with no MPC ceremony
+    // attestation (#662), so every test that registers a VK needs one wired up.
+    // Without this, `set_vk` panics with "Transcript registry not configured"
+    // and 55 of the 120 voting tests die before asserting anything. Attest-all
+    // keeps those tests about voting mechanics; the three attestation tests
+    // below turn it off and drive the mock explicitly.
+    let transcript_reg_id = env.register(mock_transcript_registry::MockTranscriptRegistry, ());
+    mock_transcript_registry::MockTranscriptRegistryClient::new(&env, &transcript_reg_id)
+        .set_attest_all(&true);
     // Pass both tree_id and registry_id to constructor (registry cached to reduce cross-contract calls)
     let guardian = Address::generate(&env);
     let voting_id = env.register(Voting, (tree_id.clone(), registry_id.clone(), guardian));
+    VotingClient::new(&env, &voting_id).set_transcript_registry(&transcript_reg_id);
 
     // Link tree to sbt
     let tree_client = mock_tree::MockTreeClient::new(&env, &tree_id);
@@ -300,7 +339,7 @@ fn create_dummy_proof(env: &Env) -> Proof {
 
 fn create_wrong_length_proof(env: &Env) -> Proof {
     // Deliberately malformed proof points (not valid curve coordinates).
-    // In tests we force verification to fail via VerifyOverride.
+    // In tests we force verification to fail via `set_verify_override_for_tests`.
     let mut bad_a = [0u8; 64];
     bad_a[0] = 1;
     let mut bad_b = [0u8; 128];
@@ -1283,11 +1322,7 @@ fn test_vote_with_malformed_proof_fails() {
     let bad_proof = create_wrong_length_proof(&env);
 
     // Force verify_groth16 to return false in test mode
-    env.as_contract(&voting_id, || {
-        env.storage()
-            .instance()
-            .set(&DataKey::VerifyOverride, &false);
-    });
+    Voting::set_verify_override_for_tests(&env, &voting_id, false);
 
     voting_client.vote(
         &1u64,
@@ -1326,11 +1361,7 @@ fn test_vote_with_swapped_pub_signals_fails() {
     );
 
     // Force verify_groth16 to return false to simulate swapped public inputs
-    env.as_contract(&voting_id, || {
-        env.storage()
-            .instance()
-            .set(&DataKey::VerifyOverride, &false);
-    });
+    Voting::set_verify_override_for_tests(&env, &voting_id, false);
 
     let _proposal = voting_client.get_proposal(&1u64, &proposal_id);
     let nullifier = U256::from_u32(&env, 99988);
@@ -1373,11 +1404,7 @@ fn test_vote_with_swapped_dao_proposal_ids_fails() {
         &VoteMode::Fixed,
     );
 
-    env.as_contract(&voting_id, || {
-        env.storage()
-            .instance()
-            .set(&DataKey::VerifyOverride, &false);
-    });
+    Voting::set_verify_override_for_tests(&env, &voting_id, false);
 
     let nullifier = U256::from_u32(&env, 1010);
     let proof = create_dummy_proof(&env);
@@ -1420,11 +1447,7 @@ fn test_vote_with_all_zero_proof_fails() {
     );
 
     // Force verification to run and fail
-    env.as_contract(&voting_id, || {
-        env.storage()
-            .instance()
-            .set(&DataKey::VerifyOverride, &false);
-    });
+    Voting::set_verify_override_for_tests(&env, &voting_id, false);
 
     let nullifier = U256::from_u32(&env, 2020);
     let proof = create_all_zero_proof(&env);
@@ -1459,11 +1482,7 @@ fn test_vote_with_off_curve_proof_fails() {
     );
 
     // Force verification to run and fail
-    env.as_contract(&voting_id, || {
-        env.storage()
-            .instance()
-            .set(&DataKey::VerifyOverride, &false);
-    });
+    Voting::set_verify_override_for_tests(&env, &voting_id, false);
 
     let nullifier = U256::from_u32(&env, 3030);
     let proof = create_off_curve_proof(&env);
@@ -1602,9 +1621,9 @@ fn test_vote_with_mismatched_vk_hash_in_proposal_fails() {
         env.storage()
             .persistent()
             .set(&DataKey::Proposal(1, proposal_id), &p);
-        env.storage()
-            .instance()
-            .set(&DataKey::VerifyOverride, &false);
+        // Fail the vk-hash comparison that comes after proof verification, so
+        // the test isolates the VK-pin check rather than the pairing check.
+        Voting::set_verify_override_for_tests(&env, &voting_id, false);
     });
 
     let proposal = voting_client.get_proposal(&1u64, &proposal_id);
@@ -4501,6 +4520,10 @@ fn test_transcript_registry_gating_blocks_unattested_vk() {
     registry.set_admin(&1u64, &admin);
 
     let transcript_reg_id = env.register(mock_transcript_registry::MockTranscriptRegistry, ());
+    // Opt out of the harness's attest-all default: these three tests are
+    // specifically about the attestation gate.
+    mock_transcript_registry::MockTranscriptRegistryClient::new(&env, &transcript_reg_id)
+        .set_attest_all(&false);
     voting.set_transcript_registry(&transcript_reg_id);
 
     // VK is not attested in transcript registry -> must panic with VkNotAttested (#93)
@@ -4517,6 +4540,10 @@ fn test_transcript_registry_gating_allows_attested_vk() {
     registry.set_admin(&1u64, &admin);
 
     let transcript_reg_id = env.register(mock_transcript_registry::MockTranscriptRegistry, ());
+    // Opt out of the harness's attest-all default: these three tests are
+    // specifically about the attestation gate.
+    mock_transcript_registry::MockTranscriptRegistryClient::new(&env, &transcript_reg_id)
+        .set_attest_all(&false);
     voting.set_transcript_registry(&transcript_reg_id);
 
     let dummy_vk = create_dummy_vk(&env);
@@ -4542,6 +4569,10 @@ fn test_set_vk_with_transcript_attestation() {
     registry.set_admin(&1u64, &admin);
 
     let transcript_reg_id = env.register(mock_transcript_registry::MockTranscriptRegistry, ());
+    // Opt out of the harness's attest-all default: these three tests are
+    // specifically about the attestation gate.
+    mock_transcript_registry::MockTranscriptRegistryClient::new(&env, &transcript_reg_id)
+        .set_attest_all(&false);
     voting.set_transcript_registry(&transcript_reg_id);
 
     let dummy_vk = create_dummy_vk(&env);
@@ -4555,4 +4586,355 @@ fn test_set_vk_with_transcript_attestation() {
     voting.set_vk_with_transcript(&1u64, &dummy_vk, &admin, &transcript_hash);
     let stored_vk = voting.vk_for_version(&1u64, &1u32);
     assert_eq!(Voting::hash_vk(&env, &stored_vk), vk_hash);
+}
+
+// ---------------------------------------------------------------------------
+// Weighted voting (ZK-013) — the weight must be *earned*, not asserted.
+//
+// Before this was fixed, `vote_weighted` range-checked `weight`, called the
+// plain `vote()`, and threw `weight` away: a "weighted" vote recorded as a
+// plain one-member-one-vote ballot. It also verified `proof` against the PLAIN
+// vote circuit's VK, so nothing constrained `weight` at all, and it never
+// looked at `balanceCommitment` — which, being a *public* input of
+// `weighted_vote.circom`, is chosen by the prover. A prover could commit to
+// 2^128-1 tokens and vote with that weight; the contract would have accepted
+// it and then discarded the number.
+// ---------------------------------------------------------------------------
+
+/// A VK shaped for `weighted_vote.circom`: 3 public signals
+/// ([balanceCommitment, maxSupply, voteWeight]) => IC length 4.
+fn create_dummy_weighted_vk(env: &Env) -> VerificationKey {
+    let g1 = bn254_g1_generator(env);
+    let g2 = bn254_g2_generator(env);
+    VerificationKey {
+        alpha: g1.clone(),
+        beta: g2.clone(),
+        gamma: g2.clone(),
+        delta: g2.clone(),
+        ic: soroban_sdk::vec![env, g1.clone(), g1.clone(), g1.clone(), g1],
+    }
+}
+
+fn setup_weighted_election() -> (Env, VotingClient<'static>, Address, u64, U256, U256) {
+    let (env, voting_id, tree_id, sbt_id, registry_id, admin) = setup_env_with_registry();
+    let voting = VotingClient::new(&env, &voting_id);
+    let sbt = mock_sbt::MockSbtClient::new(&env, &sbt_id);
+    let tree = mock_tree::MockTreeClient::new(&env, &tree_id);
+    let registry = mock_registry::MockRegistryClient::new(&env, &registry_id);
+
+    registry.set_admin(&1, &admin);
+    sbt.set_member(&1, &admin, &true);
+    let root = U256::from_u32(&env, 12345);
+    tree.set_root(&1, &root);
+
+    // Both keys registered: the plain one proves that `vote_weighted` no longer
+    // borrows it, the weighted one is what the weighted circuit must use.
+    voting.set_vk(&1, &create_dummy_vk(&env), &admin);
+    voting.set_weighted_vk(&1, &create_dummy_weighted_vk(&env), &admin);
+
+    let proposal_id = voting.create_proposal(
+        &1,
+        &String::from_str(&env, "Weighted"),
+        &String::from_str(&env, ""),
+        &(env.ledger().timestamp() + 10_000),
+        &admin,
+        &VoteMode::Fixed,
+    );
+
+    // A balance commitment the DAO actually issued, and the max supply it
+    // snapshots against.
+    let commitment = U256::from_u32(&env, 0xBEEF);
+    let max_supply = U256::from_u32(&env, 1_000_000);
+    voting.set_weighted_balance_commitment(&1, &commitment);
+
+    (env, voting, admin, proposal_id, root, commitment)
+}
+
+#[test]
+fn test_weighted_vote_accumulates_weight_into_tally() {
+    let (env, voting, _admin, proposal_id, root, commitment) = setup_weighted_election();
+    let max_supply = U256::from_u32(&env, 1_000_000);
+    let proof = create_dummy_proof(&env);
+
+    voting.vote_weighted(
+        &1,
+        &proposal_id,
+        &true,
+        &U256::from_u32(&env, 111),
+        &root,
+        &proof,
+        &commitment,
+        &max_supply,
+        &500,
+        &DOMAIN_TAG_WEIGHTED,
+    );
+
+    let tally: WeightedTally = voting.weighted_tally(&1, &proposal_id);
+    assert_eq!(tally.yes_weight, 500, "the weight must reach the tally");
+    assert_eq!(tally.yes_ballots, 1);
+    assert_eq!(tally.no_weight, 0);
+
+    // Second voter on the other side.
+    voting.vote_weighted(
+        &1,
+        &proposal_id,
+        &false,
+        &U256::from_u32(&env, 222),
+        &root,
+        &proof,
+        &commitment,
+        &max_supply,
+        &250,
+        &DOMAIN_TAG_WEIGHTED,
+    );
+
+    let tally: WeightedTally = voting.weighted_tally(&1, &proposal_id);
+    assert_eq!(tally.yes_weight, 500);
+    assert_eq!(tally.no_weight, 250);
+    assert_eq!(tally.yes_ballots, 1);
+    assert_eq!(tally.no_ballots, 1);
+}
+
+#[test]
+fn test_weighted_vote_rejects_prover_minted_balance_commitment() {
+    // The audit's forgery: a commitment the DAO never pinned. The circuit is
+    // perfectly happy with it (see circuits/test/weighted_vote.test.js), so
+    // this on-chain pin is the only thing standing between a 1-token voter and
+    // a weight of 2^128-1.
+    let (env, voting, _admin, proposal_id, root, _pinned) = setup_weighted_election();
+    let max_supply = U256::from_u32(&env, 1_000_000);
+    let minted = U256::from_u32(&env, 0xDEAD_BEEF);
+    let proof = create_dummy_proof(&env);
+
+    assert!(!voting.is_weighted_balance_commitment(&1, &minted));
+
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        voting.vote_weighted(
+            &1,
+            &proposal_id,
+            &true,
+            &U256::from_u32(&env, 999),
+            &root,
+            &proof,
+            &minted,
+            &max_supply,
+            &1_000_000,
+            &DOMAIN_TAG_WEIGHTED,
+        );
+    }));
+    assert!(
+        result.is_err(),
+        "a balance commitment the DAO never pinned must be rejected"
+    );
+
+    // And nothing was recorded.
+    let tally: WeightedTally = voting.weighted_tally(&1, &proposal_id);
+    assert_eq!(tally.yes_weight, 0);
+    assert_eq!(tally.yes_ballots, 0);
+}
+
+#[test]
+fn test_weighted_vote_rejects_zero_balance_commitment() {
+    let (env, voting, _admin, proposal_id, root, _pinned) = setup_weighted_election();
+    let max_supply = U256::from_u32(&env, 1_000_000);
+    let proof = create_dummy_proof(&env);
+
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        voting.vote_weighted(
+            &1,
+            &proposal_id,
+            &true,
+            &U256::from_u32(&env, 998),
+            &root,
+            &proof,
+            &U256::from_u32(&env, 0),
+            &max_supply,
+            &500,
+            &DOMAIN_TAG_WEIGHTED,
+        );
+    }));
+    assert!(
+        result.is_err(),
+        "a zero balance commitment must be rejected"
+    );
+}
+
+#[test]
+fn test_weighted_vk_registers_only_with_matching_ic_length() {
+    let (env, voting, _admin, _proposal_id, _root, _commitment) = setup_weighted_election();
+    let _ = env;
+
+    // A plain-vote VK (IC length 7) must not be accepted as a weighted VK:
+    // otherwise the weighted entry point would verify a weighted statement
+    // against the plain circuit's key.
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        voting.set_weighted_vk(&1, &create_dummy_vk(&env), &Address::generate(&env));
+    }));
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_weighted_vote_still_enforces_weight_bounds_and_domain_tag() {
+    let (env, voting, _admin, proposal_id, root, commitment) = setup_weighted_election();
+    let max_supply = U256::from_u32(&env, 1_000_000);
+    let proof = create_dummy_proof(&env);
+
+    // Above MAX_WEIGHT.
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        voting.vote_weighted(
+            &1,
+            &proposal_id,
+            &true,
+            &U256::from_u32(&env, 700),
+            &root,
+            &proof,
+            &commitment,
+            &max_supply,
+            &(MAX_WEIGHT + 1),
+            &DOMAIN_TAG_WEIGHTED,
+        );
+    }));
+    assert!(result.is_err(), "weight above MAX_WEIGHT must be rejected");
+
+    // Below MIN_WEIGHT.
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        voting.vote_weighted(
+            &1,
+            &proposal_id,
+            &true,
+            &U256::from_u32(&env, 701),
+            &root,
+            &proof,
+            &commitment,
+            &max_supply,
+            &0,
+            &DOMAIN_TAG_WEIGHTED,
+        );
+    }));
+    assert!(result.is_err(), "weight below MIN_WEIGHT must be rejected");
+
+    // Wrong domain tag -> cross-circuit replay.
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        voting.vote_weighted(
+            &1,
+            &proposal_id,
+            &true,
+            &U256::from_u32(&env, 702),
+            &root,
+            &proof,
+            &commitment,
+            &max_supply,
+            &500,
+            &(DOMAIN_TAG_WEIGHTED + 1),
+        );
+    }));
+    assert!(result.is_err(), "a wrong domain tag must be rejected");
+}
+
+#[test]
+fn test_weighted_and_plain_vote_share_a_nullifier_namespace() {
+    // A member must not be able to cast both a weighted and an unweighted
+    // ballot in the same election to have their weight counted twice.
+    let (env, voting, _admin, proposal_id, root, commitment) = setup_weighted_election();
+    let max_supply = U256::from_u32(&env, 1_000_000);
+    let proof = create_dummy_proof(&env);
+    let nullifier = U256::from_u32(&env, 4242);
+
+    voting.vote_weighted(
+        &1,
+        &proposal_id,
+        &true,
+        &nullifier,
+        &root,
+        &proof,
+        &commitment,
+        &max_supply,
+        &500,
+        &DOMAIN_TAG_WEIGHTED,
+    );
+
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        voting.vote(
+            &1,
+            &proposal_id,
+            &false,
+            &nullifier,
+            &root,
+            &create_dummy_proof(&env),
+        );
+    }));
+    assert!(
+        result.is_err(),
+        "the same nullifier must not be spendable on the plain path"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Public-signal accounting.
+//
+// Every other voting test builds a synthetic VK from `VOTE_CIRCUIT_IC_LEN`, so
+// the tests and the contract always agree — which is exactly why a real
+// mismatch between the circuit, the contract, and the committed verification key
+// went unnoticed for so long. These tests pin the relationship instead, by
+// counting the signals the contract actually builds.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_vote_public_signal_count_matches_ic_length() {
+    // A Groth16 IC vector has one more element than the circuit has public
+    // signals. If these ever diverge, no key can be registered.
+    assert_eq!(
+        VOTE_CIRCUIT_IC_LEN,
+        NUM_PUBLIC_SIGNALS + 1,
+        "IC length must be public signals + 1"
+    );
+    assert_eq!(
+        NUM_PUBLIC_SIGNALS, 6,
+        "vote.circom declares 6 public signals"
+    );
+}
+
+#[test]
+fn test_effective_num_candidates_is_always_satisfiable() {
+    let (env, voting_id, _tree_id, sbt_id, registry_id, admin) = setup_env_with_registry();
+    let voting = VotingClient::new(&env, &voting_id);
+    let registry = mock_registry::MockRegistryClient::new(&env, &registry_id);
+    let sbt = mock_sbt::MockSbtClient::new(&env, &sbt_id);
+
+    registry.set_admin(&1, &admin);
+    sbt.set_member(&1, &admin, &true);
+    voting.set_vk(&1, &create_dummy_vk(&env), &admin);
+    let proposal_id = voting.create_proposal(
+        &1,
+        &String::from_str(&env, "Candidates"),
+        &String::from_str(&env, ""),
+        &(env.ledger().timestamp() + 10_000),
+        &admin,
+        &VoteMode::Fixed,
+    );
+
+    // No election config: `get_num_candidates` reports 0 ("unbounded"), but the
+    // circuit constrains `voteChoice < numCandidates`, so 0 would admit no
+    // witness at all. The effective value must be floored.
+    assert_eq!(voting.get_num_candidates(&1, &proposal_id), 0);
+    assert_eq!(voting.get_effective_num_candidates(&1, &proposal_id), 2);
+
+    // A configured value is passed through unchanged.
+    voting.set_election_config(&1, &proposal_id, &0, &0, &7);
+    assert_eq!(voting.get_num_candidates(&1, &proposal_id), 7);
+    assert_eq!(voting.get_effective_num_candidates(&1, &proposal_id), 7);
+}
+
+/// A vote is binary, so the circuit can never be satisfied with a bound below 2.
+/// This is the invariant that made the whole anonymous vote path unsatisfiable
+/// for any election that had not set an explicit candidate count.
+#[test]
+fn test_min_satisfiable_num_candidates_admits_a_binary_vote() {
+    assert!(MIN_SATISFIABLE_NUM_CANDIDATES >= 2);
+    for choice in 0..2u32 {
+        assert!(
+            choice < MIN_SATISFIABLE_NUM_CANDIDATES,
+            "voteChoice={choice} must be below the circuit's numCandidates bound"
+        );
+    }
 }

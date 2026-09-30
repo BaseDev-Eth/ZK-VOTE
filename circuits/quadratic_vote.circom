@@ -100,6 +100,16 @@ template QuadraticVote(levels, N, CREDIT_BITS, MAX_CREDITS, BUDGET_BITS, MAX_BUD
 
     // Binding commitment to the (hidden) allocations for later reveal/tally:
     // allocationsHash = Poseidon(vc_0, pid_0, vc_1, pid_1, ...).
+    //
+    // SECURITY NOTE: This circuit does NOT enforce uniqueness of allocProposalIds,
+    // meaning a prover could allocate multiple entries to the same proposal ID.
+    // Example attack: With budget=100, MAX_CREDITS=10, N=5, a prover could set
+    // voiceCredits=[5,5,5,0,0] with all three allocProposalIds pointing to the same
+    // proposal, costing 75 credits but effectively delivering 15 credits to one proposal
+    // (honest cost would be 225). The contract MUST aggregate by unique proposal IDs
+    // during tally to prevent this. Alternatively, add uniqueness constraints here
+    // (but that breaks legitimate multi-proposal allocation UX). This is a known
+    // limitation of the current QV design.
     component allocHasher = Poseidon(2 * N);
     for (var i = 0; i < N; i++) {
         allocHasher.inputs[2 * i] <== voiceCredits[i];

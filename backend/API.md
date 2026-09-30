@@ -1654,26 +1654,33 @@ curl -X POST http://localhost:3001/events/notify \
 
 ## Bridge
 
-Cross-chain (EVM -> Soroban) vote relay. Vote authenticity comes entirely from the submitted proof, so `POST /bridge/vote` is intentionally unauthenticated (matching an on-chain contract call, which anyone can submit).
+Cross-chain (EVM -> Soroban) vote relay. The Soroban `relay_vote` method does
+**not** verify a Groth16 proof, so this HTTP endpoint must: (1) authenticate the
+caller, (2) rate-limit, and (3) verify the bridge circuit proof off-chain before
+the relayer co-signs. Proof / eligibility failures always return `VOTE_REJECTED`
+without disclosing which check failed.
 
 ### POST /bridge/vote
 
 Submit a cross-chain vote proof.
 
-**Authentication:** No
-**Rate Limit:** None
+**Authentication:** Yes (`X-Relayer-Auth` / Bearer token via `authGuard`)
+**Rate Limit:** `voteLimiter`
+**Body limit:** 5kb (`bodyLimit`)
 
 #### Request Body
 
-| Field        | Type     | Required | Description                          |
-| ------------ | -------- | -------- | ------------------------------------ |
-| `daoId`      | `number` | Yes      | Positive integer DAO identifier      |
-| `proposalId` | `number` | Yes      | Positive integer proposal identifier |
-| `voteChoice` | `number` | Yes      | `0` or `1`                           |
-| `nullifier`  | `string` | Yes      | Hex string, max 64 chars             |
-| `voteRoot`   | `string` | Yes      | Hex string, max 64 chars             |
-| `sbtRoot`    | `string` | Yes      | Hex string, max 64 chars             |
-| `proof`      | `object` | Yes      | `{ a, b, c }` Groth16 proof (hex)    |
+| Field             | Type     | Required | Description                                      |
+| ----------------- | -------- | -------- | ------------------------------------------------ |
+| `daoId`           | `number` | Yes      | Positive integer DAO identifier                  |
+| `proposalId`      | `number` | Yes      | Positive integer proposal identifier             |
+| `voteChoice`      | `number` | Yes      | `0` or `1`                                       |
+| `nullifier`       | `string` | Yes      | Hex string, max 64 chars                         |
+| `voteRoot`        | `string` | Yes      | Hex string, max 64 chars                         |
+| `sbtRoot`         | `string` | Yes      | Hex string, max 64 chars                         |
+| `sbtContractAddr` | `string` | Yes      | Hex field element (public signal 0)              |
+| `memberAddr`      | `string` | Yes      | Hex field element (public signal 1)              |
+| `proof`           | `object` | Yes      | `{ a, b, c }` Groth16 proof (hex) — verified     |
 
 #### Response (200)
 
@@ -1681,7 +1688,14 @@ Submit a cross-chain vote proof.
 { "success": true, "txHash": "abc123...64hex" }
 ```
 
----
+#### Error Responses
+
+| Status | Error            | Cause                                      |
+| ------ | ---------------- | ------------------------------------------ |
+| 400    | `VOTE_REJECTED`  | Invalid, signal, or simulation failure  |
+| 401    | `Unauthorized`   | Missing/invalid relayer auth token         |
+| 429    | rate limited     | Too many submissions                       |
+
 
 ### GET /bridge/nullifier/:daoId/:proposalId/:nullifier
 

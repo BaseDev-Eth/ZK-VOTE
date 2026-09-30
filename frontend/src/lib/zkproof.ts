@@ -138,12 +138,16 @@ export interface VoteProofInput {
   daoId: string;
   proposalId: string;
   voteChoice: string; // "0" for no, "1" for yes
-  relayerAddress: string; // Relayer Stellar address - public signal for relayer binding
+  /** Public signal: must match on-chain ElectionConfig.num_candidates (#645) */
+  numCandidates: string; // bounds voteChoice in-circuit
   commitment: string; // Identity commitment - private input, computed internally in circuit
   pathElements: string[];
   pathIndices: number[];
   circuitVersion?: string; // "v1" or "v2" (defaults to "v1")
   chainId?: string; // Required for v2 circuits
+  familyNullifier?: string; // v2 only: breaks cross-proposal linkability
+  nonce?: string; // v2 only: re-vote counter
+  relayerAddress?: string; // v2 only
 }
 
 export interface CommentProofInput {
@@ -181,6 +185,8 @@ export interface BridgeProofInput {
   sbtLeaf: string;
   sbtContractAddr: string;
   memberAddr: string;
+  /** EVM chain id — public signal for cross-chain domain separation (#649) */
+  chainId?: string;
   votingPathElements: string[];
   votingPathIndices: number[];
   sbtPathElements: string[];
@@ -240,6 +246,7 @@ export interface VersionedVK {
   hash: string;
   fetchedAt: number;
   numPublicSignals?: number;
+  vkVersion?: number; // CRITICAL (#660): Track VK version from backend
 }
 
 export class VKMismatchError extends Error {
@@ -293,9 +300,25 @@ function loadVKFromStorage(
     const raw = localStorage.getItem(key);
     if (!raw) return null;
     const parsed = JSON.parse(raw) as VersionedVK;
+
+    // CRITICAL (#660): Validate VK integrity and version binding
+    if (!parsed.hash) {
+      console.warn(`[VK] Loaded VK from localStorage missing integrity hash for ${circuitId} v${version}`);
+      return null;
+    }
+    if (typeof parsed.version !== 'number' || parsed.version !== version) {
+      console.warn(`[VK] Version mismatch in localStorage for ${circuitId}: expected v${version}, got v${parsed.version}`);
+      return null;
+    }
+    if (typeof parsed.circuitId !== 'string' || parsed.circuitId !== circuitId) {
+      console.warn(`[VK] Circuit ID mismatch in localStorage: expected ${circuitId}, got ${parsed.circuitId}`);
+      return null;
+    }
+
     vkMemoryCache.set(vkCacheKey(circuitId, version), parsed);
     return parsed;
-  } catch {
+  } catch (e) {
+    console.warn(`[VK] Failed to load VK from localStorage for ${circuitId} v${version}:`, e);
     return null;
   }
 }
@@ -340,9 +363,11 @@ export async function fetchVersionedVK(
   }
 
   const data = await res.json();
-  // Backend returns { vk, version, hash, numPublicSignals } or { verificationKey }
+  // Backend returns { vk, version, hash, numPublicSignals, vkVersion } or { verificationKey }
   const vk = data.vk ?? data.verificationKey ?? data;
   const hash: string = data.hash ?? data.vkHash ?? (await computeVKHash(vk));
+
+  // CRITICAL (#660): Bind VK to the backend version for integrity verification
   const entry: VersionedVK = {
     circuitId,
     version: data.version ?? version,
@@ -350,6 +375,7 @@ export async function fetchVersionedVK(
     hash,
     fetchedAt: Date.now(),
     numPublicSignals: data.numPublicSignals,
+    vkVersion: data.vkVersion ?? data.version, // Store backend-provided VK version
   };
 
   // Detect stale if backend reports a newer version than requested
@@ -584,31 +610,50 @@ export async function generateVoteProof(
     const circuitVersion = input.circuitVersion ?? "v1";
     let circuitInput: Record<string, unknown>;
     if (circuitVersion === "v2") {
-      // vote_v2.circom: 10 public signals
+      // vote_v2.circom: 10 public signals + private blindingFactor
       circuitInput = {
         root: input.root,
         nullifier: input.nullifier,
+        familyNullifier: input.familyNullifier ?? "0",
         daoId: input.daoId,
         proposalId: input.proposalId,
         voteChoice: input.voteChoice,
+        numCandidates: input.numCandidates,
         chainId: input.chainId || "0",
-        relayerAddress: input.relayerAddress,
+        nonce: input.nonce ?? "0",
+        relayerAddress: input.relayerAddress ?? "0",
         secret: input.secret,
         salt: input.salt,
+        blindingFactor: input.blindingFactor,
         pathElements: input.pathElements,
         pathIndices: input.pathIndices,
       };
     } else {
-      // vote_v1.circom: 7 public signals (vote.circom with relayerAddress)
+      // vote.circom: 6 public signals
+      //   [root, nullifier, daoId, proposalId, voteChoice, numCandidates]
+      //
+      // `numCandidates` is not optional. The circuit range-checks
+      // `voteChoice < numCandidates` against this PUBLIC input so the contract
+      // can be sure the proof enforced the candidate bound the election was
+      // configured with. Leaving it out leaves the signal at 0, which makes
+      // `voteChoice < 0` unsatisfiable — so the witness cannot be generated at
+      // all. It was missing here, which is one reason the anonymous vote path
+      // produced no usable proofs.
+      //
+      // There is deliberately no `relayerAddress` on this path: see the header
+      // of circuits/vote_template.circom. A public signal that the verifier
+      // cannot check binds nothing, and adding it made the IC length disagree
+      // with the contract.
       circuitInput = {
         root: input.root,
         nullifier: input.nullifier,
         daoId: input.daoId,
         proposalId: input.proposalId,
         voteChoice: input.voteChoice,
-        relayerAddress: input.relayerAddress,
+        numCandidates: input.numCandidates,
         secret: input.secret,
         salt: input.salt,
+        blindingFactor: input.blindingFactor,
         pathElements: input.pathElements,
         pathIndices: input.pathIndices,
       };
@@ -748,6 +793,7 @@ export async function generateBridgeProof(
       voteChoice: input.voteChoice,
       voteRoot: input.voteRoot,
       sbtRoot: input.sbtRoot,
+      chainId: input.chainId ?? "0",
       secret: input.secret,
       salt: input.salt,
       votingPathElements: input.votingPathElements,

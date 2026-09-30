@@ -7,7 +7,7 @@
  */
 
 import { setIndexerSpanExporter, type ExportedIndexerSpan } from "./indexer-tracing.js";
-
+import { redactSpanAttributes } from "./tracing.js";
 import { config } from "../config.js";
 
 const endpoint = config.otelExporterOtlpEndpoint?.replace(/\/$/, "");
@@ -17,6 +17,7 @@ const timeoutMs = config.otelExportTimeoutMs;
 function toOtlpSpan(span: ExportedIndexerSpan) {
   const startUnixNano = BigInt(new Date(span.startedAt).getTime()) * 1_000_000n;
   const endUnixNano = startUnixNano + BigInt(Math.max(0, Math.round(span.durationMs * 1_000_000)));
+  const redactedAttributes = redactSpanAttributes(span.attributes);
   return {
     traceId: span.traceId,
     spanId: span.spanId,
@@ -25,9 +26,9 @@ function toOtlpSpan(span: ExportedIndexerSpan) {
     kind: INTERNAL_SPAN_KIND_INTERNAL,
     startTimeUnixNano: String(startUnixNano),
     endTimeUnixNano: String(endUnixNano),
-    attributes: Object.entries(span.attributes).map(([key, value]) => ({
+    attributes: Object.entries(redactedAttributes).map(([key, value]) => ({
       key,
-      value: typeof value === "boolean" ? { boolValue: value } : typeof value === "number" ? { intValue: value } : { stringValue: value },
+      value: typeof value === "boolean" ? { boolValue: value } : typeof value === "number" ? { intValue: value } : { stringValue: String(value) },
     })),
     status: span.status === "error" ? { code: 2, message: span.error } : { code: 1 },
   };

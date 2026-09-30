@@ -15,6 +15,9 @@ use membership_sbt::MembershipSbtClient;
 use membership_tree::MembershipTreeClient;
 use voting::{Proof, VerificationKey, VoteMode, VotingClient};
 
+// `set_vk` needs an MPC attestation source; without one it panics before
+// the test asserts anything. See zkvote_integration_tests::test_support.
+use zkvote_integration_tests::test_support::attach_transcript_registry;
 fn hex_to_bytes<const N: usize>(env: &Env, hex: &str) -> BytesN<N> {
     let bytes = hex::decode(hex).expect("invalid hex");
     assert_eq!(bytes.len(), N, "hex string wrong length");
@@ -91,6 +94,9 @@ fn test_vote_with_wrong_root_fails() {
         voting::Voting,
         (tree_id.clone(), registry_id.clone(), guardian),
     );
+
+    // Attestation source for `set_vk` (see test_support module docs).
+    attach_transcript_registry(env.clone(), &voting_id);
 
     let admin = Address::generate(&env);
     let member = Address::generate(&env);
@@ -246,6 +252,9 @@ fn test_vote_with_correct_root_succeeds() {
         voting::Voting,
         (tree_id.clone(), registry_id.clone(), guardian),
     );
+
+    // Attestation source for `set_vk` (see test_support module docs).
+    attach_transcript_registry(env.clone(), &voting_id);
 
     let admin = Address::generate(&env);
     let member = Address::generate(&env);

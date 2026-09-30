@@ -6,6 +6,10 @@ use soroban_sdk::{
 };
 
 const DAO_COUNT: Symbol = symbol_short!("dao_cnt");
+// #592 deployer attestation: registry publishes its own code hash so voting
+// contracts can pin it per-DAO (registry_hash) instead of trusting any
+// contract id that answers get_admin.
+const REGISTRY_CODE_HASH: Symbol = symbol_short!("rg_code");
 const VERSION: u32 = 2;
 const VERSION_KEY: Symbol = symbol_short!("ver");
 

@@ -99,7 +99,7 @@ router.post(
 
     try {
       log("info", "membership_register_commitment_request", { daoId, caller });
-      membershipRegistrationTotal.inc({ dao_id: String(daoId) });
+      membershipRegistrationTotal.inc({ status: "requested" });
 
       if (!config.treeContractId) {
         return res

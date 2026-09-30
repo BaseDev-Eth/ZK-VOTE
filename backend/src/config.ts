@@ -111,6 +111,10 @@ const envSchema = z.object({
   DAO_REGISTRY_CONTRACT_ID: z.string().min(1).optional(),
   MEMBERSHIP_SBT_CONTRACT_ID: z.string().min(1).optional(),
   BRIDGE_CONTRACT_ID: z.string().min(1).optional(),
+  /** Path to bridge circuit verification_key.json used by POST /bridge/vote */
+  BRIDGE_VKEY_PATH: z.string().min(1).optional(),
+  /** Salt mixed into IP hashes so truncated SHA-256 is not rainbow-tableable */
+  IP_HASH_SALT: z.string().default(""),
   CIRCUIT_REGISTRY_CONTRACT_ID: z.string().min(1).optional(),
   REWARDS_CONTRACT_ID: z.string().min(1).optional(),
   TREASURY_CONTRACT_ID: z.string().min(1).optional(),
@@ -120,6 +124,10 @@ const envSchema = z.object({
   ANCHOR_USDC_URL: z.string().url().optional(),
   ANCHOR_EURC_URL: z.string().url().optional(),
   SOROSWAP_API: z.string().url().optional(),
+  SOROSWAP_CONTRACT_ID: z
+    .string()
+    .regex(/^C[A-Z2-7]{55}$/, "SOROSWAP_CONTRACT_ID must be a Stellar C... contract id")
+    .optional(),
   VOTING_VK_VERSION: z.coerce.number().int().optional(),
 
   CORS_ORIGIN: z.string().optional(),
@@ -580,15 +588,19 @@ export const config = {
   daoRegistryContractId: process.env.DAO_REGISTRY_CONTRACT_ID,
   membershipSbtContractId: process.env.MEMBERSHIP_SBT_CONTRACT_ID,
   bridgeContractId: process.env.BRIDGE_CONTRACT_ID,
+  bridgeVkeyPath: validatedEnv.BRIDGE_VKEY_PATH,
+  ipHashSalt: validatedEnv.IP_HASH_SALT,
   circuitRegistryContractId: process.env.CIRCUIT_REGISTRY_CONTRACT_ID,
   rewardsContractId: process.env.REWARDS_CONTRACT_ID,
   treasuryContractId: validatedEnv.TREASURY_CONTRACT_ID,
-  usdcIssuer: validatedEnv.USDC_ISSUER || "GDZRIUTGHMQNRPGPB5JJYX6DCWKEZ3NDJNNB455VTMP7ZZAVDDXTCGQO",
-  eurcIssuer: validatedEnv.EURC_ISSUER || "GAML6VH2XIYLO23TT3G5ANIBDNZJCMBWYLN3OOUMTL42NF467AIXAU6F",
+  usdcIssuer: validatedEnv.USDC_ISSUER || "GXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX",
+  eurcIssuer: validatedEnv.EURC_ISSUER || "GXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX",
   horizonUrl: validatedEnv.HORIZON_URL || "https://horizon-testnet.stellar.org",
   anchorUsdcUrl: validatedEnv.ANCHOR_USDC_URL || "https://anchor.circle.com",
   anchorEurcUrl: validatedEnv.ANCHOR_EURC_URL || "https://anchor.eurc.circle.com",
   soroswapApi: validatedEnv.SOROSWAP_API || "https://api.soroswap.finance/quote",
+  // Soroswap fallback is disabled unless the exact router contract is pinned.
+  soroswapContractId: validatedEnv.SOROSWAP_CONTRACT_ID,
 
   // VK Version
   staticVkVersion: validatedEnv.VOTING_VK_VERSION,

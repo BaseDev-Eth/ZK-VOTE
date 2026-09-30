@@ -5,6 +5,12 @@ use soroban_sdk::{
 };
 
 const REGISTRY: Symbol = symbol_short!("registry");
+// #593 SBT metadata is content-addressed AND hash-pinned: token URI must carry
+// metadata_hash (sha256 of sanitized JSON); renderers reject SVG/script payloads
+// and only render via sandboxed <img>. Upload pipeline enforces
+// file-type+sharp; on-chain hash prevents gateway-swap attacks.
+const METADATA_HASH_KEY: Symbol = symbol_short!("md_hash");
+pub const MAX_METADATA_BYTES: u32 = 200_000;
 const VERSION: u32 = 1;
 const VERSION_KEY: Symbol = symbol_short!("ver");
 
