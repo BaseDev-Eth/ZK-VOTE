@@ -1,32 +1,37 @@
-# Request Priority Model (#188)
+# Request Priority Model (#602)
 
-## Tiers
+## Scheduling contract
 
-| Tier | Examples | Concurrency | Rate limit | Max queue wait |
-|---|---|---|---|---|
-| CRITICAL | `POST /vote` | 32 | 600 req/min | 5s |
-| HIGH | comments, notifications | 16 | 300 req/min | 8s |
-| MEDIUM | proposal results, Merkle root queries | 8 | 150 req/min | 15s |
-| LOW | DAO listings, health checks, IPFS fetches | 4 | 60 req/min | 30s |
+| Tier | Requests | Reserved concurrency | Maximum queue wait |
+|---|---|---:|---:|
+| `CRITICAL` | `POST /vote`, `/vote/commit`, `/vote/batch` | 16 | 5 seconds |
+| `LOW` | All `POST /comment` and `POST /comments` actions | 4 | 30 seconds |
 
-Defined in `src/priority/priorityConfig.ts`.
+The same classifier runs before the unversioned, `/api/v1`, and `/api/v2`
+mounts. API prefixes are removed before matching, so the public aliases cannot
+bypass scheduling.
 
-## How it works
+`backend/src/priority/priorityQueue.ts` uses separate worker pools. A comment
+burst can fill only the low-priority pool; it cannot occupy a vote worker or
+sit in front of a vote in the same FIFO. Requests outside the vote/comment
+write paths do not enter this queue and keep their existing route-specific
+rate limits.
 
-1. `priorityMiddleware` classifies every request by method + path (`classifyRequest`) and tags it with a tier.
-2. A per-tier sliding-window rate limiter rejects (`429`) requests that exceed that tier's limit — critical operations get the most headroom.
-3. Each request's remaining handler chain is submitted to a shared `PriorityQueue` as a unit of work for its tier.
-4. The queue drains tiers in priority order on every pass (`CRITICAL → HIGH → MEDIUM → LOW`), so CRITICAL work always claims available CRITICAL-tier concurrency first. Lower tiers run concurrently up to their own caps — they are not blocked outright, they simply never preempt CRITICAL capacity.
-5. Requests that wait past `maxQueueWaitMs` for their tier are rejected with `503 queue_timeout` rather than hanging indefinitely.
-6. `GET /internal/queue-metrics` exposes live queue depth / in-flight counts per tier for monitoring.
+The global slowdown middleware skips critical vote requests because those
+requests already pass through the wallet and vote limiters. This prevents 100
+comments from consuming a shared IP slowdown budget before a time-sensitive
+vote arrives.
 
-## Why not separate processes?
+## Monitoring
 
-The issue notes Fly.io can route by process group/path for stronger isolation. This PR implements the software-layer prioritization (assignment, queuing, rate limiting, monitoring) that's needed regardless of deployment topology. Splitting into separate Fly.io process groups for read vs. write paths is an infra change we recommend as a **follow-up**, layered on top of this: it would give process-level isolation in addition to the in-process guarantees here.
+`zkvote_priority_starvation_total{priority,route}` increments whenever a
+queued request waits at least one second before starting. Any increase for
+`priority="CRITICAL"` triggers the `ZKVotePriorityStarvation` alert and is
+shown on the relayer Grafana dashboard.
 
-## Testing
+## Regression test
 
-`src/priority/priorityQueue.test.ts` simulates concurrent load across all four tiers and asserts:
-- CRITICAL requests complete with the lowest average latency even when LOW-tier traffic floods the queue
-- No CRITICAL request is rejected due to LOW/MEDIUM tier congestion
-- Rate limiting correctly rejects tiers that exceed their configured cap
+`backend/test/priority-preemption.test.ts` enqueues 100 comments before a vote
+and proves that the vote starts before the comment backlog drains. A separate
+known-answer test deliberately saturates the critical pool and verifies that
+the starvation metric increments.

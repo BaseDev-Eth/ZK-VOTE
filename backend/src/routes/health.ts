@@ -54,6 +54,7 @@ import {
   markUnavailable,
 } from "../services/service-health.js";
 import { getSupervisor } from "../services/supervisor.js";
+import { healthEndpointStatus } from "../services/metrics.js";
 import v8 from "node:v8";
 import fs from "node:fs";
 import os from "node:os";
@@ -242,7 +243,14 @@ router.get("/health", async (req: Request, res: Response) => {
     markDegraded("sqlite", (err as Error).message);
   }
 
-  res.json(base);
+  // Issue #556 — health 503 degraded: return the correct HTTP status so
+  // load-balancers and k8s probes can act on the degraded state instead of
+  // silently keeping traffic flowing to an unhealthy instance.
+  const httpStatus = services.status === "ok" ? 200 : 503;
+  // Record the HTTP status as a Prometheus gauge so Grafana can alert when
+  // the value deviates from 200 (config drift / service degradation).
+  healthEndpointStatus.set(httpStatus);
+  res.status(httpStatus).json(base);
 });
 
 /**

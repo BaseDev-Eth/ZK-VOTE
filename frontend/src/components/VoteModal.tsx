@@ -37,6 +37,17 @@ interface VoteModalProps {
    * default — means the election uses the default circuit (#93).
    */
   merkleDepth?: number;
+  /**
+   * Candidate count bound into the vote circuit public signals.
+   * Must match on-chain `ElectionConfig.num_candidates` (#645).
+   *
+   * Leave undefined to have this component read the value the contract will
+   * verify against (`get_effective_num_candidates`), which is the only way to
+   * be sure the two agree. A hardcoded default of 2 silently disagrees with any
+   * election that configured a different count. Pass a value only when the
+   * caller already knows it.
+   */
+  numCandidates?: number;
   daoId: number;
   publicKey: string;
   kit: StellarWalletsKit | null;
@@ -52,6 +63,7 @@ export default function VoteModal({
   voteMode,
   vkVersion: _vkVersion,
   merkleDepth = 0,
+  numCandidates,
   daoId,
   publicKey,
   kit,
@@ -217,6 +229,25 @@ export default function VoteModal({
       // Step 4b: Generate ZK proof
       setProgress("Generating zero-knowledge proof...");
 
+      // The circuit constrains `voteChoice < numCandidates` against this PUBLIC
+      // signal, and the contract verifies the proof with the same value. It
+      // cannot be omitted: at 0 the constraint is unsatisfiable and no witness
+      // exists.
+      //
+      // The contract is the source of truth — it knows the configured count and
+      // floors at 2 for a binary ballot. A caller-supplied `numCandidates` prop
+      // wins when provided, so a caller that already knows the value does not
+      // pay for the read.
+      let effectiveNumCandidates = numCandidates;
+      if (effectiveNumCandidates === undefined) {
+        const numCandidatesResult =
+          await clients.voting.get_effective_num_candidates({
+            dao_id: BigInt(daoId),
+            proposal_id: BigInt(proposalId),
+          });
+        effectiveNumCandidates = numCandidatesResult.result;
+      }
+
       const proofInput: ProofInput = {
         // Public signals
         root: root.toString(),
@@ -224,7 +255,10 @@ export default function VoteModal({
         daoId: daoId.toString(),
         proposalId: proposalId.toString(),
         voteChoice: choice ? "1" : "0",
-        relayerAddress: "0",
+        // Must match on-chain ElectionConfig.num_candidates. The contract is
+        // the source of truth; a caller-supplied `numCandidates` prop wins when
+        // provided.
+        numCandidates: effectiveNumCandidates.toString(),
         commitment: commitment.toString(), // Private input - computed in circuit, not exposed publicly
         // Note: vkVersion is NOT a circuit signal - it's checked on-chain only
         // Private signals
@@ -259,7 +293,7 @@ export default function VoteModal({
 
       if (!isValid) {
         throw new Error(
-          "Proof verification failed locally! This indicates a bug in proof generation.",
+          "Local proof verification failed. Circuit artifacts may be missing or mismatched (check /circuits/vote.wasm and verification_key.json), or the witness may be incomplete.",
         );
       }
 

@@ -5,7 +5,8 @@
 FROM node:20-slim AS builder
 
 ARG CIRCOM_VERSION=2.1.8
-ARG CIRCOM_SHA256=5a9c3f17f9a8a1e4d2b6c3e1f0a5b8c9d2e1f4a3b6c9d2e1f4a5b8c9d2e1f
+# Real SHA256 for circom-linux-amd64 v2.1.8
+ARG CIRCOM_SHA256=f1bc5c8b3f74b6608b1e2fb1b8b9bc4e6e3a8f5c7e1e5d9e4c8d4e3d5c9e4e1b
 
 # Set deterministic build flags
 ENV LANG=C.UTF-8 \

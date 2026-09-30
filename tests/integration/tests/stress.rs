@@ -20,6 +20,9 @@ use membership_sbt::MembershipSbtClient;
 use membership_tree::MembershipTreeClient;
 use voting::{VerificationKey, VoteMode, VotingClient};
 
+// `set_vk` needs an MPC attestation source; without one it panics before
+// the test asserts anything. See zkvote_integration_tests::test_support.
+use zkvote_integration_tests::test_support::attach_transcript_registry;
 fn zero_g1(env: &Env) -> BytesN<64> {
     BytesN::from_array(env, &[0u8; 64])
 }
@@ -81,6 +84,9 @@ fn setup_dao_with_options(
         voting::Voting,
         (tree_id.clone(), registry_id.clone(), guardian),
     );
+
+    // Attestation source for `set_vk` (see test_support module docs).
+    attach_transcript_registry(env.clone(), &voting_id);
 
     let registry = DaoRegistryClient::new(env, &registry_id);
     let sbt = MembershipSbtClient::new(env, &sbt_id);

@@ -536,7 +536,7 @@ export const wsRateLimitTotal = new Counter({
 export const relayerKeyBalance = new Gauge({
   name: "zkvote_relayer_key_balance_xlm",
   help: "Current balance of relayer keys in XLM",
-  labelNames: ["key_id", "public_key", "role"] as const,
+  labelNames: ["key_id", "role"] as const,
   registers: [register],
 });
 
@@ -550,14 +550,14 @@ export const relayerKeyRotationsTotal = new Counter({
 export const relayerKeyAgeSeconds = new Gauge({
   name: "zkvote_relayer_key_age_seconds",
   help: "Age of relayer key in seconds since activation",
-  labelNames: ["key_id", "public_key"] as const,
+  labelNames: ["key_id"] as const,
   registers: [register],
 });
 
 export const relayerKeyTransactionsTotal = new Counter({
   name: "zkvote_relayer_key_transactions_total",
   help: "Total transactions signed by relayer key",
-  labelNames: ["key_id", "public_key"] as const,
+  labelNames: ["key_id"] as const,
   registers: [register],
 });
 
@@ -577,12 +577,13 @@ export function normalizeRoute(path: string): string {
   return cleanPath
     .replace(/\/[0-9a-f]{20,}/gi, "/:hash")
     .replace(/\/[CG][A-Z2-7]{55}/g, "/:address")
+    .replace(/\/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi, "/:uuid")
     .replace(
-      /\/(dao|proposal|comment|comments|events|bridge|circuits|ipfs|membership|claim|pay|swap|ramp|nullifier|root|root-history)\/[^/]+/gi,
+      /\/(dao|proposal|comment|comments|events|bridge|circuits|ipfs|membership|claim|pay|swap|ramp|nullifier|root|root-history|vote|threshold|randomness)\/[^/]+/gi,
       "/$1/:param",
     )
     .replace(
-      /\/(proposal|nullifier|root-history|comments|comment)\/[^/]+\/[^/]+/gi,
+      /\/(proposal|nullifier|root-history|comments|comment|threshold)\/[^/]+\/[^/]+/gi,
       "/$1/:param/:id2",
     )
     .replace(/\/(root|daos|ready|health|config|metrics|db)(\/|$)/g, "/$1$2");
@@ -650,6 +651,13 @@ export const batch_partial_failure_total = new Counter({
   registers: [register],
 });
 
+export const priorityStarvationTotal = new Counter({
+  name: "zkvote_priority_starvation_total",
+  help: "Total priority-queued requests that waited beyond the starvation threshold",
+  labelNames: ["priority", "route"] as const,
+  registers: [register],
+});
+
 // ============================================
 // COST-BASED RATE LIMITING METRICS (#525)
 // ============================================
@@ -658,6 +666,20 @@ export const paymentOpsPerMinute = new Histogram({
   name: "zkvote_payment_ops_per_minute",
   help: "Histogram of payment operations per minute per IP",
   buckets: [1, 5, 10, 25, 50, 100],
+  registers: [register],
+});
+
+export const swapContractRejectedTotal = new Counter({
+  name: "zkvote_swap_contract_rejected_total",
+  help: "Soroswap quote responses rejected because the returned contract id was absent or did not match the pinned router",
+  labelNames: ["reason"] as const,
+  registers: [register],
+});
+
+export const trustlinePreflightFailureTotal = new Counter({
+  name: "zkvote_trustline_preflight_failure_total",
+  help: "Payment or swap operations rejected before submission because a required Stellar trustline was missing or unauthorized",
+  labelNames: ["asset", "role", "reason"] as const,
   registers: [register],
 });
 
@@ -730,3 +752,20 @@ export const daoReconciliationLastOk = new Gauge({
   registers: [register],
 });
 
+// ============================================
+// OFFLINE RETRY & CDC OUTBOX LAG METRICS (#542, #544)
+// ============================================
+
+export const offlineRetryTotal = new Counter({
+  name: "zkvote_offline_retry_total",
+  help: "Total offline retry attempts processed from client queue",
+  labelNames: ["type", "status"] as const,
+  registers: [register],
+});
+
+export const outboxLagGauge = new Gauge({
+  name: "zkvote_outbox_lag_seconds",
+  help: "Outbox pattern CDC WAL replication lag in seconds",
+  labelNames: ["channel"] as const,
+  registers: [register],
+});

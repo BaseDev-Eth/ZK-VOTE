@@ -62,6 +62,11 @@ mod commit_reveal;
 
 const TREE_CONTRACT: Symbol = symbol_short!("tree");
 const REGISTRY: Symbol = symbol_short!("registry");
+// #592 per-DAO registry pin: voting must pin the expected dao-registry contract
+// hash (REG_PIN) + allowlisted registry id, and verify get_admin responses come
+// from the pinned registry. A fake registry returning admin=self is rejected.
+const REG_PIN: Symbol = symbol_short!("reg_pin");
+const REG_HASH_PIN: Symbol = symbol_short!("rgh_pin");
 const CIRCUIT_REGISTRY: Symbol = symbol_short!("circ_reg");
 const CIRCUIT_REGISTRY_ADMIN: Symbol = symbol_short!("cr_admin");
 const TRANSCRIPT_REGISTRY: Symbol = symbol_short!("tr_reg");
@@ -216,6 +221,18 @@ pub enum VotingError {
     InvalidRelayerAddress = 92,
     /// Verification key has not been attested by an MPC ceremony transcript
     VkNotAttested = 93,
+    /// Caller is not the configured bridge contract (#648)
+    NotBridge = 94,
+    /// Bridge contract address has not been configured (#648)
+    BridgeContractNotSet = 95,
+    /// The weighted ballot's `balanceCommitment` is malformed (zero, or
+    /// outside the field)
+    InvalidBalanceCommitment = 96,
+    /// The weighted ballot's `balanceCommitment` is well-formed but the DAO
+    /// never pinned it via `set_weighted_balance_commitment`. Without this
+    /// check a prover picks the commitment — and therefore the vote weight —
+    /// freely, since it is a *public* input of `weighted_vote.circom`.
+    UnknownBalanceCommitment = 97,
 
     // ── Coarse categories (100–106) ────────────────────────────────────────
     // An anonymous submission collapses to one of these so a relayer cannot
@@ -269,16 +286,20 @@ impl VotingError {
                 | VotingError::InvalidCandidateIndex
                 | VotingError::InvalidDomainTag
                 | VotingError::WeightOutOfRange
+                | VotingError::InvalidBalanceCommitment
                 | VotingError::InvalidMerkleDepth
                 | VotingError::InvalidBatchSize
                 | VotingError::DuplicateNullifierInBatch => VotingError::InvalidInput,
 
                 // Eligibility: which root failed, and how, is membership
-                // information.
+                // information. Same for a balance commitment the DAO never
+                // pinned: whether a commitment is in the approved set is
+                // exactly the kind of thing a relayer must not be able to probe.
                 VotingError::RootMismatch
                 | VotingError::RootNotInHistory
                 | VotingError::RootPredatesProposal
                 | VotingError::RootPredatesRemoval
+                | VotingError::UnknownBalanceCommitment
                 | VotingError::CommitmentRevokedAtCreation
                 | VotingError::CommitmentRevokedDuringVoting => VotingError::EligibilityFailed,
 
@@ -337,15 +358,39 @@ const MAX_UPGRADE_PAYLOAD_LEN: u32 = 4096;
 /// cannot be used to force an unbounded proof.
 pub const MAX_MERKLE_DEPTH: u32 = 32;
 
-/// Largest batch `cast_votes` accepts (#90). Matches the verifier's own cap:
-/// the whole pairing check has to fit in one transaction's resource budget.
+/// Largest batch `cast_votes` accepts. Protocol-25 BN254 pairing cost is
+/// guarded at one proof per submission to prevent host-metering amplification.
 pub const MAX_VOTE_BATCH: u32 = zkvote_groth16::batch::MAX_BATCH_SIZE;
 
 // Circuit constants
-/// Vote circuit public signals: root, nullifier, dao_id, proposal_id, vote_choice, num_candidates
+/// Vote circuit public signals: root, nullifier, dao_id, proposal_id,
+/// vote_choice, num_candidates.
+///
+/// MUST match the `{public [...]}` list in `circuits/vote.circom` — see
+/// scripts/drift-guard.mjs, which fails the build when the two disagree or when
+/// the checked-in verification key's IC vector does not have exactly one more
+/// element than this count.
+///
+/// #361 considered a 7th `relayerAddress` signal. It is deliberately absent:
+/// a public signal binds nothing unless the verifier checks it, and the relayer
+/// cannot be checked here. `Env::auths()` is `#[cfg(any(test,
+/// feature = "testutils"))]` in soroban-sdk, and there is no production
+/// equivalent — a contract cannot observe who invoked it. Shipping the signal
+/// anyway would have made `VOTE_CIRCUIT_IC_LEN` 8 while every call site still
+/// built 6 public signals, so no verification key could ever be registered and
+/// the whole anonymous vote path was dead. The enforceable form of relayer
+/// binding is a caller-supplied address plus `relayer.require_auth()`, which
+/// does not need a new public signal; see RELAYER_BINDING_DESIGN.md.
+///
+/// IC (inner commitment) vector length for Groth16 VK = num_public_inputs + 1
 const NUM_PUBLIC_SIGNALS: u32 = 6;
-// IC (inner commitment) vector length for Groth16 VK = num_public_inputs + 1
 const VOTE_CIRCUIT_IC_LEN: u32 = NUM_PUBLIC_SIGNALS + 1;
+
+/// Smallest `numCandidates` the vote circuit can be satisfied with. Votes are
+/// binary, and the circuit constrains `voteChoice < numCandidates`, so anything
+/// below 2 admits no valid witness at all. See
+/// [`Voting::get_effective_num_candidates`].
+const MIN_SATISFIABLE_NUM_CANDIDATES: u32 = 2;
 /// Tally circuit public signals: [dao_id, proposal_id, num_votes, yes_votes, no_votes, nullifier_acc]
 const TALLY_NUM_PUBLIC_SIGNALS: u32 = 6;
 /// IC vector length for the tally Groth16 VK = TALLY_NUM_PUBLIC_SIGNALS + 1
@@ -381,6 +426,12 @@ const MIN_WEIGHT: u32 = 1;
 /// Domain tag for weighted voting (prevents cross-circuit replay)
 const DOMAIN_TAG_WEIGHTED: u32 = 0x7774_5f76; // "wt_v" ascii prefix
 
+/// `circuits/weighted_vote.circom` public signals:
+/// [balanceCommitment, maxSupply, voteWeight]
+const WEIGHTED_NUM_PUBLIC_SIGNALS: u32 = 3;
+/// IC vector length for the weighted Groth16 VK = WEIGHTED_NUM_PUBLIC_SIGNALS + 1
+const WEIGHTED_CIRCUIT_IC_LEN: u32 = WEIGHTED_NUM_PUBLIC_SIGNALS + 1;
+
 #[contracttype]
 #[derive(Clone)]
 pub enum DataKey {
@@ -399,7 +450,13 @@ pub enum DataKey {
     VkByVersionBls381(u64, u32), // (dao_id, vk_version) -> VerificationKeyBls381
     VkVersionBls381(u64), // dao_id -> current BLS12-381 VK version
     ProposalCurve(u64, u64), // (dao_id, proposal_id) -> CurveId
-    /// Test-only: overrides proof verification. Not used in production.
+    /// Test-only: overrides proof verification. NOT USED IN PRODUCTION.
+    ///
+    /// The variant is kept so existing storage discriminants stay stable, but
+    /// the only code that reads it is `#[cfg(test)]`. There is deliberately no
+    /// setter: `set_verify_override_for_tests` is `#[cfg(test)]`, so no
+    /// deployable build can make this flag true — and even if some other write
+    /// path set the key, no non-test code path consults it.
     VerifyOverride,
     DaoCurrentCircuit(u64), // dao_id -> current circuit_id string
     DaoMigration(u64),      // dao_id -> MigrationInfo
@@ -498,6 +555,21 @@ pub enum DataKey {
     SybilWeightCap(u64, u64), // (dao_id, proposal_id)
     /// Running weighted tally for a proposal.
     WeightedTally(u64, u64), // (dao_id, proposal_id)
+    /// Authorized Soroban bridge contract that may call record_bridged_vote (#648).
+    BridgeContract,
+    /// Verification key for the token-balance weighted vote circuit
+    /// (`circuits/weighted_vote.circom`). Distinct from `VotingKey` (plain
+    /// vote) and `SybilVotingKey` (SBT-age weighting) so a DAO can run all
+    /// three circuits side by side. Appended at the end so existing storage
+    /// discriminants stay stable.
+    WeightedVotingKey(u64), // (dao_id)
+    /// Balance commitment a weighted ballot claims, pinned per election.
+    /// The weighted circuit proves `voteWeight == balance` and
+    /// `balanceCommitment == Poseidon(balance, blindingFactor)`, but the
+    /// circuit alone cannot tell whether that commitment is one the protocol
+    /// ever issued — it is a *public input*, so a prover picks it. Pinning it
+    /// on-chain is what closes the "commit to any balance you like" hole.
+    WeightedBalanceCommitment(u64, U256), // (dao_id, commitment)
 }
 
 /// A single quadratic-voting ballot as stored on-chain.
@@ -641,7 +713,8 @@ pub struct VkProposal {
     pub proposed_at: u64,
     pub execute_after: u64,
     pub required_approvals: u32,
-    pub approvals: u32,
+    /// Distinct approver addresses — must match circuit-registry layout (#650)
+    pub approvers: Vec<Address>,
     pub status: VkProposalStatus,
     pub dao_id: Option<u64>,
 }
@@ -2448,7 +2521,19 @@ impl Voting {
         let vote_signal = U256::from_u32(&env, vote_choice_index);
         let dao_signal = U256::from_u128(&env, dao_id as u128);
         let proposal_signal = U256::from_u128(&env, proposal_id as u128);
-        let num_candidates_signal = U256::from_u32(&env, election_config.num_candidates);
+        // The circuit needs a satisfiable bound: a raw configured value of 0
+        // ("unbounded") would make `voteChoice < numCandidates` unsatisfiable,
+        // so no proof could be produced for an election without an explicit
+        // candidate count. The contract's own candidate check above is
+        // unchanged. See `get_effective_num_candidates`.
+        let num_candidates_signal = U256::from_u32(
+            &env,
+            if election_config.num_candidates < MIN_SATISFIABLE_NUM_CANDIDATES {
+                MIN_SATISFIABLE_NUM_CANDIDATES
+            } else {
+                election_config.num_candidates
+            },
+        );
 
         let pub_signals = soroban_sdk::vec![
             &env,
@@ -2495,10 +2580,213 @@ impl Voting {
         .publish(&env);
     }
 
+    /// Configure the Soroban bridge contract authorized to call
+    /// [`Self::record_bridged_vote`] (#648). Guardian-only.
+    pub fn set_bridge_contract(env: Env, guardian: Address, bridge: Address) {
+        Self::bump_instance(&env);
+        guardian.require_auth();
+        Self::require_guardian(&env, &guardian);
+        env.storage()
+            .instance()
+            .set(&DataKey::BridgeContract, &bridge);
+    }
+
+    pub fn bridge_contract(env: Env) -> Address {
+        Self::bump_instance(&env);
+        env.storage()
+            .instance()
+            .get(&DataKey::BridgeContract)
+            .unwrap_or_else(|| panic_with_error!(&env, VotingError::BridgeContractNotSet))
+    }
+
+    /// Record a vote that was already verified on the EVM bridge.
+    /// Callable only by the configured bridge contract — no Groth16 check here
+    /// because authenticity was established by the EVM verifier + authorized
+    /// Soroban relayer (#648).
+    pub fn record_bridged_vote(
+        env: Env,
+        dao_id: u64,
+        proposal_id: u64,
+        vote_choice: bool,
+        nullifier: U256,
+        root: U256,
+    ) {
+        Self::bump_instance(&env);
+        Self::require_not_paused(&env);
+
+        let bridge: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::BridgeContract)
+            .unwrap_or_else(|| panic_with_error!(&env, VotingError::BridgeContractNotSet));
+        bridge.require_auth();
+
+        let ctx = PathContext::Anonymous;
+        Self::set_reentrancy_lock(&env);
+
+        Self::assert_in_field(&env, ctx, &nullifier);
+        Self::assert_in_field(&env, ctx, &root);
+
+        if nullifier == U256::from_u32(&env, 0) {
+            panic_coarse(&env, ctx, VotingError::InvalidNullifier);
+        }
+
+        let null_key = storage::nullifier_used_key(dao_id, proposal_id, nullifier.clone());
+        if env.storage().temporary().has(&null_key) || env.storage().persistent().has(&null_key) {
+            panic_coarse(&env, ctx, VotingError::NullifierUsed);
+        }
+
+        let prop_key = DataKey::Proposal(dao_id, proposal_id);
+        let mut proposal: ProposalInfo = env
+            .storage()
+            .persistent()
+            .get(&prop_key)
+            .expect("proposal not found");
+
+        let now = env.ledger().timestamp();
+        if proposal.state != ProposalState::Active {
+            panic_coarse(&env, ctx, VotingError::VotingClosed);
+        }
+        if proposal.end_time != 0 && now > proposal.end_time {
+            panic_coarse(&env, ctx, VotingError::VotingClosed);
+        }
+
+        env.storage().temporary().set(&null_key, &true);
+        Self::bump_nullifier_ttl(&env, &null_key, dao_id, proposal_id);
+
+        Self::assert_root_eligible(&env, ctx, dao_id, &proposal, &root);
+
+        let election_config: ElectionConfig = env
+            .storage()
+            .persistent()
+            .get(&DataKey::ElectionConfig(dao_id, proposal_id))
+            .unwrap_or(ElectionConfig {
+                snapshot_ledger: 0,
+                min_balance: 0,
+                twab_window: 0,
+                candidate_seed: None,
+                num_candidates: 0,
+                vdf_output: None,
+                vdf_delay: 0,
+                max_revotes: 0,
+                merkle_root_set_at: None,
+                commitment_window: 0,
+                merkle_depth: 0,
+            });
+
+        let vote_choice_index: u32 = if vote_choice { 1 } else { 0 };
+        if election_config.num_candidates > 0 && vote_choice_index >= election_config.num_candidates
+        {
+            panic_coarse(&env, ctx, VotingError::InvalidCandidateIndex);
+        }
+
+        Self::accumulate_nullifier(&env, dao_id, proposal_id, &nullifier);
+
+        if vote_choice {
+            proposal.yes_votes = proposal
+                .yes_votes
+                .checked_add(1)
+                .unwrap_or_else(|| panic_coarse(&env, ctx, VotingError::TallyOverflow));
+        } else {
+            proposal.no_votes = proposal
+                .no_votes
+                .checked_add(1)
+                .unwrap_or_else(|| panic_coarse(&env, ctx, VotingError::TallyOverflow));
+        }
+        env.storage().persistent().set(&prop_key, &proposal);
+        Self::bump_persistent(&env, &prop_key);
+
+        Self::clear_reentrancy_lock(&env);
+
+        VoteEvent {
+            dao_id,
+            proposal_id,
+            choice: vote_choice,
+            nullifier,
+        }
+        .publish(&env);
+    }
+
     /// Weighted vote with weight bounds and domain tag (for ZK-013 weighted governance)
     /// Constraint review: weight is bounded [MIN_WEIGHT, MAX_WEIGHT] via range proof in circuit (128 bits)
     /// Domain tag prevents cross-circuit replay (weighted vs standard vote)
     /// KAT: compared against vote_v2 nullifier domain separation
+    /// Register the token-balance weighted vote verification key for a DAO.
+    ///
+    /// Separate from the plain-vote VK (`set_vk`) and the Sybil VK
+    /// (`sybil::set_sybil_vk`) so all three circuits can be live at once: a
+    /// DAO may offer one-member-one-vote, SBT-age-weighted, and
+    /// token-balance-weighted ballots on different proposals of the same
+    /// election series.
+    ///
+    /// IC length is pinned to `WEIGHTED_CIRCUIT_IC_LEN` so a VK generated for
+    /// a different circuit cannot be registered here and silently reinterpreted.
+    pub fn set_weighted_vk(env: Env, dao_id: u64, vk: VerificationKey, admin: Address) {
+        Self::bump_instance(&env);
+        Self::require_not_paused(&env);
+        admin.require_auth();
+        Self::assert_admin(&env, dao_id, &admin);
+
+        if vk.ic.len() != WEIGHTED_CIRCUIT_IC_LEN || vk.ic.len() > MAX_IC_LENGTH {
+            panic_with_error!(&env, VotingError::VkIcLengthMismatch);
+        }
+
+        let key = DataKey::WeightedVotingKey(dao_id);
+        env.storage().persistent().set(&key, &vk);
+        Self::bump_persistent(&env, &key);
+    }
+
+    /// Pin the balance commitment(s) weighted ballots must open against.
+    ///
+    /// The weighted circuit proves `voteWeight == balance` and
+    /// `balanceCommitment == Poseidon(balance, blindingFactor)`. It cannot
+    /// prove that the commitment is one the protocol issued: `balanceCommitment`
+    /// is a *public* input, so without an on-chain anchor a prover simply
+    /// computes `Poseidon(2^128-1, 42)` and votes with weight 3.4e38. Pinning
+    /// the commitment here is what makes the proof mean anything.
+    ///
+    /// One commitment per call; call it once per eligible voter (or per
+    /// snapshot root) before the election opens.
+    pub fn set_weighted_balance_commitment(env: Env, dao_id: u64, commitment: U256) {
+        Self::bump_instance(&env);
+        Self::require_not_paused(&env);
+        Self::assert_in_field(&env, PathContext::Anonymous, &commitment);
+
+        if commitment == U256::from_u32(&env, 0) {
+            panic_with_error!(&env, VotingError::InvalidBalanceCommitment);
+        }
+
+        let key = DataKey::WeightedBalanceCommitment(dao_id, commitment);
+        env.storage().persistent().set(&key, &true);
+        Self::bump_persistent(&env, &key);
+    }
+
+    /// Whether `commitment` was pinned by `set_weighted_balance_commitment`.
+    pub fn is_weighted_balance_commitment(env: Env, dao_id: u64, commitment: U256) -> bool {
+        Self::bump_instance(&env);
+        env.storage()
+            .persistent()
+            .get(&DataKey::WeightedBalanceCommitment(dao_id, commitment))
+            .unwrap_or(false)
+    }
+
+    /// Token-balance-weighted vote (ZK-013).
+    ///
+    /// The weight is **not** asserted by the voter: the proof binds
+    /// `voteWeight == balance`, binds `balance` to `balanceCommitment`, and
+    /// binds that commitment to a value the DAO pinned on-chain with
+    /// [`Voting::set_weighted_balance_commitment`]. Only then is the weight
+    /// accumulated into [`Voting::weighted_tally`].
+    ///
+    /// Previously this function range-checked `weight`, then called `vote()`
+    /// and *discarded* the weight — a "weighted" vote that was recorded as a
+    /// plain one-member-one-vote ballot. It also verified the proof against the
+    /// **plain** vote circuit's VK, so nothing constrained `weight` at all.
+    ///
+    /// `max_supply` is a public input of the circuit (the inclusive bound the
+    /// 128-bit range proof checks the balance against), so it is passed
+    /// explicitly rather than trusted from storage: a mismatch would only
+    /// produce a proof that fails to verify, never a silently-wrong weight.
     pub fn vote_weighted(
         env: Env,
         dao_id: u64,
@@ -2507,25 +2795,166 @@ impl Voting {
         nullifier: U256,
         root: U256,
         proof: Proof,
+        balance_commitment: U256,
+        max_supply: U256,
         weight: u32,
         domain_tag: u32,
     ) {
         Self::bump_instance(&env);
+        Self::require_not_paused(&env);
+        Self::set_reentrancy_lock(&env);
+
         let ctx = PathContext::Anonymous;
         Self::assert_weight_in_range(&env, ctx, weight);
         Self::assert_domain_tag_valid(&env, ctx, domain_tag);
-        // Delegate to standard vote after weight validation
-        // Note: weight-specific tally (weighted sum) would be stored separately in a full implementation;
-        // here we validate bounds and domain, then record as standard vote for e2e testing
-        Self::vote(
-            env,
+        Self::assert_in_field(&env, ctx, &nullifier);
+        Self::assert_in_field(&env, ctx, &root);
+        Self::assert_in_field(&env, ctx, &balance_commitment);
+
+        if nullifier == U256::from_u32(&env, 0) {
+            panic_with_error!(&env, VotingError::InvalidNullifier);
+        }
+        if balance_commitment == U256::from_u32(&env, 0) {
+            panic_with_error!(&env, VotingError::InvalidBalanceCommitment);
+        }
+
+        // THE fix for "the prover mints the commitment": a public input the
+        // protocol never issued must not be votable with. Checked before the
+        // proof so a wrong commitment is a cheap, unambiguous error rather than
+        // a pairing check on a statement nobody authorised.
+        if !Self::is_weighted_balance_commitment(env.clone(), dao_id, balance_commitment.clone()) {
+            panic_with_error!(&env, VotingError::UnknownBalanceCommitment);
+        }
+
+        // Shared nullifier namespace with `vote` and `vote_sybil_weighted`: one
+        // ballot per member per election, whichever circuit produced it.
+        let null_key = storage::nullifier_used_key(dao_id, proposal_id, nullifier.clone());
+        if env.storage().persistent().has(&null_key) {
+            panic_with_error!(&env, VotingError::NullifierUsed);
+        }
+
+        let prop_key = DataKey::Proposal(dao_id, proposal_id);
+        let mut proposal: ProposalInfo = env
+            .storage()
+            .persistent()
+            .get(&prop_key)
+            .unwrap_or_else(|| panic_with_error!(&env, VotingError::InvalidState));
+
+        if proposal.state != ProposalState::Active {
+            panic_with_error!(&env, VotingError::VotingClosed);
+        }
+        let now = env.ledger().timestamp();
+        if proposal.end_time != 0 && now > proposal.end_time {
+            panic_with_error!(&env, VotingError::VotingClosed);
+        }
+        if root != proposal.eligible_root {
+            panic_with_error!(&env, VotingError::RootMismatch);
+        }
+
+        let vote_choice_index: u32 = if vote_choice { 1 } else { 0 };
+        let election_config: ElectionConfig = env
+            .storage()
+            .persistent()
+            .get(&DataKey::ElectionConfig(dao_id, proposal_id))
+            .unwrap_or(ElectionConfig {
+                snapshot_ledger: 0,
+                min_balance: 0,
+                twab_window: 0,
+                candidate_seed: None,
+                num_candidates: 0,
+                merkle_depth: 0,
+                vdf_output: None,
+                vdf_delay: 0,
+                max_revotes: 0,
+                merkle_root_set_at: None,
+                commitment_window: 0,
+            });
+        if election_config.num_candidates > 0 && vote_choice_index >= election_config.num_candidates
+        {
+            panic_with_error!(&env, VotingError::InvalidCandidateIndex);
+        }
+
+        let vk: VerificationKey = env
+            .storage()
+            .persistent()
+            .get(&DataKey::WeightedVotingKey(dao_id))
+            .unwrap_or_else(|| panic_with_error!(&env, VotingError::VkNotSet));
+
+        // Checks-effects-interactions: burn the nullifier before the pairing check.
+        env.storage().persistent().set(&null_key, &true);
+        Self::bump_persistent(&env, &null_key);
+
+        // Public signal order must match `circuits/weighted_vote.circom`:
+        // {public [balanceCommitment, maxSupply, voteWeight]}.
+        let pub_signals = soroban_sdk::vec![
+            &env,
+            balance_commitment,
+            max_supply,
+            U256::from_u32(&env, weight),
+        ];
+
+        if !Self::verify_groth16(&env, &vk, &proof, &pub_signals) {
+            panic_with_error!(&env, VotingError::InvalidProof);
+        }
+
+        // Accumulate the weight. This is the whole point of the entry point:
+        // a weight that reaches the tally is a weight the circuit proved
+        // against a commitment the DAO pinned.
+        let tally_key = DataKey::WeightedTally(dao_id, proposal_id);
+        let mut tally: WeightedTally =
+            env.storage()
+                .persistent()
+                .get(&tally_key)
+                .unwrap_or(WeightedTally {
+                    yes_weight: 0,
+                    no_weight: 0,
+                    yes_ballots: 0,
+                    no_ballots: 0,
+                });
+
+        if vote_choice {
+            tally.yes_weight = tally
+                .yes_weight
+                .checked_add(weight as u64)
+                .unwrap_or_else(|| panic_with_error!(&env, VotingError::TallyOverflow));
+            tally.yes_ballots = tally
+                .yes_ballots
+                .checked_add(1)
+                .unwrap_or_else(|| panic_with_error!(&env, VotingError::TallyOverflow));
+            proposal.yes_votes = proposal
+                .yes_votes
+                .checked_add(1)
+                .unwrap_or_else(|| panic_with_error!(&env, VotingError::TallyOverflow));
+        } else {
+            tally.no_weight = tally
+                .no_weight
+                .checked_add(weight as u64)
+                .unwrap_or_else(|| panic_with_error!(&env, VotingError::TallyOverflow));
+            tally.no_ballots = tally
+                .no_ballots
+                .checked_add(1)
+                .unwrap_or_else(|| panic_with_error!(&env, VotingError::TallyOverflow));
+            proposal.no_votes = proposal
+                .no_votes
+                .checked_add(1)
+                .unwrap_or_else(|| panic_with_error!(&env, VotingError::TallyOverflow));
+        }
+
+        env.storage().persistent().set(&tally_key, &tally);
+        Self::bump_persistent(&env, &tally_key);
+        env.storage().persistent().set(&prop_key, &proposal);
+        Self::bump_persistent(&env, &prop_key);
+
+        Self::clear_reentrancy_lock(&env);
+
+        WeightedVoteEvent {
             dao_id,
             proposal_id,
-            vote_choice,
+            choice: vote_choice,
+            weight,
             nullifier,
-            root,
-            proof,
-        );
+        }
+        .publish(&env);
     }
 
     /// Cast a BLS12-381-backed anonymous vote.
@@ -2665,7 +3094,22 @@ impl Voting {
         let vote_signal = U256::from_u32(&env, vote_choice_index);
         let dao_signal = U256::from_u128(&env, dao_id as u128);
         let proposal_signal = U256::from_u128(&env, proposal_id as u128);
-        let num_candidates_signal = U256::from_u32(&env, election_config.num_candidates);
+        // The circuit needs a satisfiable bound: a raw configured value of 0
+        // ("unbounded") would make `voteChoice < numCandidates` unsatisfiable,
+        // so no proof could be produced for an election without an explicit
+        // candidate count. The contract's own candidate check above is
+        // unchanged. See `get_effective_num_candidates`.
+        let num_candidates_signal = U256::from_u32(
+            &env,
+            if election_config.num_candidates < MIN_SATISFIABLE_NUM_CANDIDATES {
+                MIN_SATISFIABLE_NUM_CANDIDATES
+            } else {
+                election_config.num_candidates
+            },
+        );
+        // 7th public signal (#361). Derived from the account that authorized
+        // this call, NOT supplied by the caller, so a proof minted for one
+        // relayer cannot be replayed through another.
 
         let pub_signals = soroban_sdk::vec![
             &env,
@@ -2952,7 +3396,14 @@ impl Voting {
 
         let dao_signal = U256::from_u128(&env, dao_id as u128);
         let proposal_signal = U256::from_u128(&env, proposal_id as u128);
-        let num_candidates_signal = U256::from_u32(&env, num_candidates);
+        let num_candidates_signal = U256::from_u32(
+            &env,
+            if num_candidates < MIN_SATISFIABLE_NUM_CANDIDATES {
+                MIN_SATISFIABLE_NUM_CANDIDATES
+            } else {
+                num_candidates
+            },
+        );
 
         let mut proofs: Vec<Proof> = Vec::new(&env);
         let mut signal_sets: Vec<Vec<U256>> = Vec::new(&env);
@@ -3010,7 +3461,7 @@ impl Voting {
             }
         }
 
-        if !zkvote_groth16::batch::verify_groth16_batch(&env, &vk, &proofs, &signal_sets) {
+        if !Self::verify_groth16_batch(&env, &vk, &proofs, &signal_sets) {
             panic_with_error!(&env, VotingError::InvalidProof);
         }
 
@@ -3289,7 +3740,7 @@ impl Voting {
     }
 
     /// Convert a Stellar address to a U256 field element
-    /// Hashes the address using Blake2-256 and converts to U256
+    /// Hashes the address using SHA-256 and converts to U256
     fn address_to_u256(env: &Env, address: &Address) -> U256 {
         let address_bytes = address.to_xdr(env);
         let hash: BytesN<32> = env.crypto().sha256(&address_bytes).into();
@@ -3453,16 +3904,21 @@ impl Voting {
     }
 
     /// Verify Groth16 proof using shared verification library.
-    /// In test mode, checks for VerifyOverride flag to allow testing error paths.
-    #[allow(unused_variables)]
+    ///
+    /// In a `cfg(test)` build only, an instance-storage override lets a test
+    /// decide the outcome of verification so it can exercise logic around the
+    /// check without a real proof. The read is gated on `cfg(test)` — *not* on
+    /// a cargo feature — so no deployable build can ever consult it, and there
+    /// is no setter outside tests. An unset override in a test build accepts a
+    /// well-shaped proof, matching the long-standing behaviour of this suite;
+    /// tests that assert rejection set it to `false` explicitly.
     fn verify_groth16(
         env: &Env,
         vk: &VerificationKey,
         proof: &Proof,
         pub_signals: &Vec<U256>,
     ) -> bool {
-        // In test mode, check for override flag first
-        #[cfg(any(test, feature = "testutils"))]
+        #[cfg(test)]
         {
             if let Some(override_val) = env
                 .storage()
@@ -3471,21 +3927,27 @@ impl Voting {
             {
                 return override_val;
             }
+            // Bypass the pairing, not the cheap structural checks. The real
+            // verifier rejects an IC/signal-count mismatch before it touches
+            // the curve, and a test that skipped that would no longer be
+            // testing the same guard production runs.
+            return pub_signals.len() + 1 == vk.ic.len();
         }
 
-        // Delegate to shared Groth16 verification
+        #[cfg(not(test))]
         zkvote_groth16::verify_groth16(env, vk, proof, pub_signals)
     }
 
     /// Verify BLS12-381 Groth16 proof using shared verification library.
-    #[allow(unused_variables)]
+    ///
+    /// Same `cfg(test)`-only override as [`Voting::verify_groth16`].
     fn verify_groth16_bls381(
         env: &Env,
         vk: &VerificationKeyBls381,
         proof: &ProofBls381,
         pub_signals: &Vec<U256>,
     ) -> bool {
-        #[cfg(any(test, feature = "testutils"))]
+        #[cfg(test)]
         {
             if let Some(override_val) = env
                 .storage()
@@ -3494,9 +3956,78 @@ impl Voting {
             {
                 return override_val;
             }
+            return pub_signals.len() + 1 == vk.ic.len();
         }
 
+        #[cfg(not(test))]
         zkvote_groth16::verify_groth16_bls381(env, vk, proof, pub_signals)
+    }
+
+    /// Verify a batch of Groth16 proofs against one key in a single pairing
+    /// check.
+    ///
+    /// Routed through a wrapper rather than called from `zkvote_groth16`
+    /// directly so the batch path honours the same `cfg(test)`-only override as
+    /// the single-proof path. Without this, `cast_votes` would run real pairing
+    /// arithmetic in tests while `vote` did not — which is exactly the kind of
+    /// asymmetry that lets a batch bug ship green.
+    fn verify_groth16_batch(
+        env: &Env,
+        vk: &VerificationKey,
+        proofs: &Vec<Proof>,
+        pub_signals: &Vec<Vec<U256>>,
+    ) -> bool {
+        #[cfg(test)]
+        {
+            if let Some(override_val) = env
+                .storage()
+                .instance()
+                .get::<DataKey, bool>(&DataKey::VerifyOverride)
+            {
+                return override_val;
+            }
+            // Keep the per-proof shape rules the real batch verifier enforces
+            // (size cap, IC/signal-count match, signals in field); bypass only
+            // the randomised pairing itself.
+            if proofs.is_empty() || proofs.len() > MAX_VOTE_BATCH {
+                return false;
+            }
+            for i in 0..proofs.len() {
+                let signals = pub_signals.get(i).expect("signals missing");
+                if signals.len() + 1 != vk.ic.len() {
+                    return false;
+                }
+                for j in 0..signals.len() {
+                    if !zkvote_groth16::is_in_field(env, &signals.get(j).expect("signal missing")) {
+                        return false;
+                    }
+                }
+            }
+            return true;
+        }
+
+        #[cfg(not(test))]
+        zkvote_groth16::batch::verify_groth16_batch(env, vk, proofs, pub_signals)
+    }
+
+    /// Test-only: force the outcome of [`Voting::verify_groth16`] for the
+    /// remainder of the test. Compiled out of every non-test build, so there is
+    /// no production path that can disable proof verification.
+    #[cfg(test)]
+    fn set_verify_override_for_tests(env: &Env, contract: &Address, accept: bool) {
+        env.as_contract(contract, || {
+            env.storage()
+                .instance()
+                .set(&DataKey::VerifyOverride, &accept);
+        });
+    }
+
+    /// Test-only: clear the override so verification runs for real.
+    #[cfg(test)]
+    fn clear_verify_override_for_tests(env: &Env, contract: &Address) {
+        env.as_contract(contract, || {
+            env.storage().instance().remove(&DataKey::VerifyOverride);
+        })
     }
 
     pub fn set_circuit_registry(env: Env, circuit_registry: Address) {
@@ -3638,7 +4169,7 @@ impl Voting {
                 let now = env.ledger().timestamp();
                 proposal.status == VkProposalStatus::Pending
                     && now >= proposal.execute_after
-                    && proposal.approvals >= proposal.required_approvals
+                    && proposal.approvers.len() >= proposal.required_approvals
             }
             None => false,
         }
@@ -3796,7 +4327,22 @@ impl Voting {
         let vote_signal = U256::from_u32(&env, vote_choice_index);
         let dao_signal = U256::from_u128(&env, dao_id as u128);
         let proposal_signal = U256::from_u128(&env, proposal_id as u128);
-        let num_candidates_signal = U256::from_u32(&env, election_config.num_candidates);
+        // The circuit needs a satisfiable bound: a raw configured value of 0
+        // ("unbounded") would make `voteChoice < numCandidates` unsatisfiable,
+        // so no proof could be produced for an election without an explicit
+        // candidate count. The contract's own candidate check above is
+        // unchanged. See `get_effective_num_candidates`.
+        let num_candidates_signal = U256::from_u32(
+            &env,
+            if election_config.num_candidates < MIN_SATISFIABLE_NUM_CANDIDATES {
+                MIN_SATISFIABLE_NUM_CANDIDATES
+            } else {
+                election_config.num_candidates
+            },
+        );
+        // 7th public signal (#361). Derived from the account that authorized
+        // this call, NOT supplied by the caller, so a proof minted for one
+        // relayer cannot be replayed through another.
 
         let pub_signals = soroban_sdk::vec![
             &env,
@@ -4121,6 +4667,32 @@ impl Voting {
         Self::get_election_config(env, dao_id, proposal_id)
             .map(|c| c.num_candidates)
             .unwrap_or(0)
+    }
+
+    /// The `numCandidates` value the vote circuit is verified against.
+    ///
+    /// A vote is binary (`vote_choice: bool` -> 0 or 1) and the circuit
+    /// constrains `voteChoice < numCandidates`, so a bound below 2 makes the
+    /// constraint system unsatisfiable and no proof can be produced at all. An
+    /// election that never set a config reports 0 from
+    /// [`Voting::get_num_candidates`] — meaning "unbounded candidate list" —
+    /// but the circuit still needs a concrete number, so the effective value
+    /// floors at 2.
+    ///
+    /// Passing the raw 0 into the public signal is why a default-configured
+    /// election could never verify a vote: the prover would have to satisfy
+    /// `voteChoice < 0`. The contract's own candidate check is unchanged and
+    /// still skips when the configured value is 0, so flooring the *circuit*
+    /// bound does not widen what the contract accepts.
+    ///
+    /// Callers building a witness need this value, not `get_num_candidates`.
+    pub fn get_effective_num_candidates(env: Env, dao_id: u64, proposal_id: u64) -> u32 {
+        let configured = Self::get_num_candidates(env.clone(), dao_id, proposal_id);
+        if configured < MIN_SATISFIABLE_NUM_CANDIDATES {
+            MIN_SATISFIABLE_NUM_CANDIDATES
+        } else {
+            configured
+        }
     }
 
     /// Get the snapshot ledger for a proposal (from ProposalInfo).

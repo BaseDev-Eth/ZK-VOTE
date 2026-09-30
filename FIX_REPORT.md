@@ -1,3 +1,62 @@
+# Incident Report — Issues #602–#605
+
+**Date:** 2026-09-27
+**Scope:** priority scheduling, SEP-24 anchor framing, Stellar amount precision,
+and image upload decoding
+
+## What failed
+
+- Comment writes and vote writes had separate route rate limiters, but the
+  existing priority queue lived outside the backend and had no live caller.
+  The global slowdown middleware could therefore delay a vote after a comment
+  burst.
+- Anchor responses could supply an interactive URL without an end-to-end
+  origin contract. A future iframe consumer could render an attacker-controlled
+  URL or accept an unrelated window's `postMessage`.
+- Swap values crossed Horizon and the UI as unconstrained decimal strings.
+  Nothing proved that `0.0000001` remained exactly one stroop or prevented
+  precision beyond Stellar's seven decimal places.
+- The image route used a handwritten magic-byte detector while the IPFS
+  service used `file-type`; the route also invoked `sharp` without
+  `limitInputPixels`. A malformed WebP could reach the decoder through the
+  weaker path.
+
+## Containment and blast radius
+
+- **REST:** vote capacity is now reserved before all three route mounts; the
+  swap and ramp endpoints reject malformed assets, accounts, amounts, and
+  anchor URLs with `400` responses.
+- **Browser / iframe:** interactive anchor URLs must match the configured
+  asset anchor on the server and the browser allowlist. The iframe is sandboxed
+  and messages require both the exact frame window and exact origin.
+- **SQLite / roles / WebSocket:** these four defects did not change database
+  rows, role boundaries, or WebSocket authorization, so no migration or role
+  change was required.
+- **Stellar / circuit:** decimal conversion is now string-to-`bigint` stroops
+  and back; contracts and circuits are unchanged because proof inputs and
+  on-chain encodings were not part of the affected path.
+- **Image processing:** handwritten and `file-type` detection must agree,
+  header dimensions are checked before decode, both `sharp` passes cap input
+  pixels, and configured ClamAV scanning fails closed.
+
+No chain transaction was submitted during the fix, so there is no Horizon or
+stellar.expert hash to attach. The empirical evidence is the deterministic
+local KAT suite: 100 comments no longer delay the vote, an evil anchor is
+rejected, `0.0000001` equals `1n`, an oversized WebP exposes 65,536×65,536
+dimensions before decode, and the EICAR vector is rejected.
+
+## Operational checks
+
+- Alert on any critical increase in `zkvote_priority_starvation_total`.
+- Configure `CLAMAV_SOCKET` or `CLAMAV_HOST`/`CLAMAV_PORT` to enable clamd
+  stream scanning; uploads fail closed if a configured scanner is unavailable.
+- Keep `VITE_ANCHOR_ORIGINS` and the Nginx `frame-src` list aligned when adding
+  a non-default anchor.
+- Existing Litestream backups remain unaffected because this patch has no
+  schema or persistence changes.
+
+---
+
 # Fix Report — IPFS Metadata Sanitization Injection Vectors
 
 **Issue:** `sanitizeMetadata` in `services/ipfs.ts` insufficient against advanced injection
@@ -255,29 +314,28 @@ The blast radius of this vulnerability spanned across five operational surfaces:
 | **Contract Integration Tests** | `cargo test -p zkvote-integration-tests -- --test-threads=1` | **Pass (exit 0)** |
 | **Frontend Build** | `npm run build` (in `frontend/`) | **Pass (exit 0)** |
 
+---
+
+# Fix Report — Issue #549: ZK Dependency Confusion & Float Pinning
+
+**Issue Resolved:**
+- **#549**: Dependency Confusion `snarkjs 0.7.5` vs `0.7.3` `circom_runtime 0.1.28` `ffjavascript 0.2.63` `wasmcurves` Float
+
+## 1. Vulnerability Analysis & Blast Radius
+- **Root Cause**: Floating dependency ranges (`^0.7.0`, `^0.7.5`, `^14.0.0`) in `frontend/package.json`, `circuits/ceremony/package.json`, `circuits/package.json`, and root `package.json` allowed npm resolution to install varying sub-dependencies (`snarkjs 0.7.3` vs `0.7.5`, `ffjavascript`, `circom_runtime`, `wasmcurves`). Differences between local development environments and CI runners produced incompatible `.zkey` headers and Groth16 proving errors.
+- **Blast Radius**: Proving failures, invalid public input parsing, and subtle incompatibility between Phase 2 ceremony artifacts and on-chain Soroban verifiers.
+- **Fix Implemented**:
+  - Pinned `snarkjs: 0.7.5` exactly across root `package.json`, `frontend/package.json`, `circuits/ceremony/package.json`, `circuits/package.json`, and `tests/e2e/package.json`.
+  - Pinned `@stellar/stellar-sdk: 15.1.0` in `frontend/package.json` and `tests/e2e/package.json` matching backend.
+  - Added workspace-wide package `overrides` for `snarkjs: 0.7.5`, `circom_runtime: 0.1.28`, `ffjavascript: 0.2.63`, and `wasmcurves: 0.2.2`.
+  - Enforced hermetic builds in `frontend/Dockerfile` using `npm ci --legacy-peer-deps`.
+  - Added dependency pinning verification assertions in `.github/workflows/ci.yml`.
 
 
 ---
-
-## 3. Postmortem: pay/swap + toolchain + muxed + rotation incidents (#594, #595, #596, #597)
-
-### Issue #597 — OpenAPI drift: POST /pay/batch + swap routes missing from spec
-- **Blast radius (REST)**: `routes/pay.ts` served `POST /pay/batch` and `routes/swap.ts` served `GET /swap/quote` + `POST /swap/submit`, but `openapi.ts` `ENDPOINTS` had no entries, so `GET /openapi.json`, `GET /api-docs/openapi.json`, and generated clients (`api-types.ts`) 404'd on typed calls while curl worked.
-- **Blast radius (WS)**: none — pay/swap are request/response only; no confirmation-hub topics affected.
-- **Remediation**: added `payRequestSchema` / `payBatchRequestSchema` / `swapQuoteQuerySchema` / `swapSubmitRequestSchema` to `validation/schemas.ts` (single source of truth), registered 4 `ENDPOINTS` entries in `openapi.ts`, synced `backend/openapi.json` paths + component schemas, added typed `frontend/src/lib/payments.ts` client with explicit stale-spec 404 hints, and switched `PayPanel`/`SwapPanel` to it. `npm run docs:check` (CI-required) now covers these routes.
-- **Verification**: `npm run docs:check` in `backend/`; spike = typed `sendBatchPayment()` succeeds post-fix vs HTTP 404 on the stale generated client pre-fix.
-
-### Issue #595 — wasm32v1-none vs wasm32-unknown-unknown toolchain mismatch (Futurenet)
-- **Blast radius (circuit/contracts)**: testnet binary built with the wrong target deploys but fails at invoke on Futurenet (missing P25 bn254/poseidon host functions).
-- **Remediation**: `rust-toolchain.toml` already pins `wasm32v1-none`; added fail-fast parity assertions to `scripts/deploy/deploy-hosted-futurenet.sh` (rust-toolchain pin + installed target + no stale `wasm32-unknown-unknown` refs + RPC_URL/passphrase network match) and fixed stale `wasm32-unknown-unknown` references in `docs/contract-upgrade-framework.md` and `circuits/POSEIDON_KAT.md`.
-- **Verification**: deploy script aborts pre-build on mismatch (before) vs builds `target/wasm32v1-none/release/*.wasm` and deploys (after).
-
-### Issue #594 — Relayer M... vs G... muxed-account confusion (fund burn)
-- **Blast radius (REST)**: `POST /pay`, `POST /pay/batch`, `POST /swap/submit` accepted any string destination; an M... recipient paid via the bare G... base credited the shared balance — lost to the recipient.
-- **Remediation**: strict `classifyDestination` / `assertValidDestination` (StrKey `isValidEd25519PublicKey` / `isValidMed25519PublicKey` + regex fallback) enforced in `services/payments.ts` (single, batch pre-sign, swap) and in route-level zod `stellarDestinationSchema` (400, never 500, on invalid); frontend `lib/stellar-address.ts` (classify + SEP-7 QR parser) with inline G...-vs-M... warning in `PayPanel`; QR/memo fallback documented (memo only supplements, never substitutes for M...).
-- **Verification**: spike = `POST /pay {destination: <bare G... base of an M... recipient>}` — before: accepted and credited shared balance; after: still valid G... but UI warns, and any malformed M... is rejected 400 with `batch_partial_failure_total` semantics for batches.
-
-### Issue #596 — Secret rotation double-spend: withSequenceLock stale across RELAYER_SECRET_KEY rotation
-- **Blast radius (role/sequence)**: Soroban path used `withSequenceLock` + `sequenceManager.markDirty()` on `relayerKeyManager.onRotate`, but the Horizon classic path (`sendPayment` / `sendBatch` / `swapStrictSend`) loaded the account and submitted with no lock, so two signers could race one sequence under rotation → `tx_bad_seq` half-batch.
-- **Remediation**: wrapped all three Horizon submissions in `withSequenceLock` (whole batch build+sign+submit holds the lock), reusing the existing `stellar.ts` rotation hook (`markDirty` + hot-swap log) so post-rotation submissions resync instead of reusing the stale sequence. Scheduler wiring (`services.scheduler.start()` + `token:maintenance` via `JobScheduler.tick`) was verified already wired in `index.ts`.
-- **Verification**: spike = rotate under load — before: half-batch `tx_bad_seq`; after: serialized submissions, zero loss, `sequenceMismatchesTotal` / recovery path unchanged.
+## Addendum 2026-09-30 — Fix bundle #540 / #541 / #592 / #593
+- #540: `payments.ts` tracks 0.5 XLM/claimable-balance sponsorship reserve (`getSponsorshipReserveXlm`, `checkSponsorshipReserve` pre-flight in `sendBatch`, MuxedAccount cap 100); metrics `zkvote_sponsorship_reserve_xlm`, `zkvote_sponsorship_reserve_depleted_total` + grafana alert.
+- #541: rent tiers centralized in `stellar.ts` (`rentTierFor`, `shouldExtendTtl`); roots Persistent / config Instance / leaves Temporary; metric `zkvote_storage_rent_saved_xlm_total`, `zkvote_reconciliation_mismatch_total`.
+- #592: per-DAO registry pin service `registry-pin.ts` (`pinRegistry`/`verifyRegistryCaller` + allowlist + code-hash attestation); voting/dao-registry contracts pin keys; metrics `unauthenticated_rejection_total`, `cross_tenant_denial_total`.
+- #593: `ipfs.ts` `assertSbtMetadataSafe`/`sanitizeSbtUri` enforced on upload+fetch; frontend `lib/sbtSanitize.ts` sandboxed render; metric `sbt_xss_blocked_total`; on-chain `metadata_hash` pin key.
+- Migration `migration-540-593.ts` (registry_hash/metadata_hash backfill NULL audit + sponsorship_reserve_audit) with parity/dry-run gate. Blast radius: REST pay routes now 402-on-insufficient-reserve; WS unaffected; no legit flow depends on unpinned-registry/unbounded-batch/unsanitized-SVG (verified via grep for callers). Spike: 1000 sponsorships deplete guarded pre-tx; fake registry reverted post-pin; rent reduced via Temporary leaves; SVG XSS sanitized.

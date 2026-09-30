@@ -140,6 +140,8 @@ export class ZkVoteClient {
     voteMode: "Fixed" | "Trailing";
     eligibleRoot: bigint;
     vkVersion?: number | null;
+    /** Bound into circuit public signals; defaults to 2 for binary ballots (#645) */
+    numCandidates?: number;
   }): Promise<{ txHash: string; queued?: boolean }> {
     if (!this.publicKey) throw new Error("publicKey required for voting");
 
@@ -223,6 +225,23 @@ export class ZkVoteClient {
     // 7. Generate proof
     const wasmPath = "/circuits/vote.wasm";
     const zkeyPath = "/circuits/vote_final.zkey";
+    // The circuit constrains `voteChoice < numCandidates` against this PUBLIC
+    // signal, and the contract verifies the proof with the same value it
+    // reports here. It is not optional: with numCandidates left at 0 the
+    // constraint is unsatisfiable and no witness can be produced.
+    //
+    // The contract is the source of truth — it knows the configured candidate
+    // count and floors the value at 2 for a binary ballot. A caller-supplied
+    // `params.numCandidates` (#645) still wins when present, so a caller that
+    // already knows the value does not pay for the read.
+    let numCandidates = params.numCandidates;
+    if (numCandidates === undefined) {
+      const effective = await this.voting.get_effective_num_candidates({
+        dao_id: BigInt(params.daoId),
+        proposal_id: BigInt(params.proposalId),
+      });
+      numCandidates = (effective as unknown as { result: number }).result;
+    }
     const proofInput: VoteProofInput = {
       secret,
       salt,
@@ -232,7 +251,7 @@ export class ZkVoteClient {
       daoId: params.daoId.toString(),
       proposalId: params.proposalId.toString(),
       voteChoice: params.choice ? "1" : "0",
-      relayerAddress: "0",
+      numCandidates: numCandidates.toString(),
       commitment,
       pathElements,
       pathIndices,

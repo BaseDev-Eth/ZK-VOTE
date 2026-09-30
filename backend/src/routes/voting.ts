@@ -88,6 +88,7 @@ import {
   relayDuration,
   relayErrors,
   relayQueueDepth,
+  offlineRetryTotal,
 } from "../services/metrics.js";
 import { sharedSingleFlight } from "../utils/singleflight.js";
 import type { Groth16Proof } from "../types/index.js";
@@ -674,6 +675,39 @@ router.post(
 
     const idempotencyKey = req.header("Idempotency-Key") || nullifier;
 
+    if (req.header("X-Offline-Retry")) {
+      offlineRetryTotal.inc({ type: "vote", status: "attempt" });
+    }
+
+    // Check if nullifier has already been recorded/confirmed (idempotency check for offline retries)
+    const existingReceipt = nullifier ? getVoteReceipt(nullifier) : null;
+    if (
+      existingReceipt &&
+      existingReceipt.dao_id === daoId &&
+      existingReceipt.proposal_id === proposalId
+    ) {
+      log("info", "vote_nullifier_already_used", {
+        nullifier,
+        txHash: existingReceipt.tx_hash,
+        daoId,
+        proposalId,
+      });
+      offlineRetryTotal.inc({ type: "vote", status: "conflict" });
+      return res.status(409).json({
+        ok: false,
+        error: "Nullifier already used: vote already recorded",
+        status: "CONFLICT",
+        receipt: {
+          nullifier: existingReceipt.nullifier,
+          txHash: existingReceipt.tx_hash,
+          proposalId: existingReceipt.proposal_id,
+          daoId: existingReceipt.dao_id,
+          status: existingReceipt.status,
+          createdAt: existingReceipt.created_at,
+        },
+      });
+    }
+
     try {
       log("info", "vote_request", { daoId, proposalId });
 
@@ -723,7 +757,9 @@ router.post(
       try {
         cleanupExpiredVoteSubmissions(120000);
       } catch (err) {
-        log("warn", "cleanup_expired_vote_submissions_failed", { error: (err as Error).message });
+        log("warn", "cleanup_expired_vote_submissions_failed", {
+          error: (err as Error).message,
+        });
       }
 
       // Idempotency: check vote_submissions table keyed on idempotencyKey
@@ -791,7 +827,9 @@ router.post(
         // The external Stellar boundary is replaceable in test mode; without
         // an override, the submission is reported as unavailable.
         if (!voteExecutorOverride) {
-          return res.status(400).json({ error: "Simulation failed (test mode)" });
+          return res
+            .status(400)
+            .json({ error: "Simulation failed (test mode)" });
         }
         const execution = await voteExecutorOverride({
           daoId,

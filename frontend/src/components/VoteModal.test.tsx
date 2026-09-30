@@ -24,6 +24,12 @@ vi.mock("../lib/client", () => ({
       get_leaf_index: vi.fn().mockResolvedValue({ result: 0 }),
       current_root: vi.fn().mockResolvedValue({ result: BigInt("12345") }),
     },
+    // The component reads the circuit's `numCandidates` public signal from the
+    // contract before building the witness (it is a required circuit input, not
+    // an optional one — the circuit constrains `voteChoice < numCandidates`).
+    voting: {
+      get_effective_num_candidates: vi.fn().mockResolvedValue({ result: 2 }),
+    },
   })),
 }));
 

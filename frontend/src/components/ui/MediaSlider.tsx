@@ -97,16 +97,13 @@ export function MediaSlider({ image, videoUrl }: MediaSliderProps) {
 
   if (videoUrl) {
     const youtubeId = getYouTubeId(videoUrl);
-    const vimeoId = getVimeoId(videoUrl);
 
     mediaItems.push({
       type: "video",
       src: videoUrl,
       thumbnail: youtubeId
         ? `https://img.youtube.com/vi/${youtubeId}/mqdefault.jpg`
-        : vimeoId
-          ? `https://vumbnail.com/${vimeoId}.jpg`
-          : undefined,
+        : undefined,
       alt: "Video",
     });
   }

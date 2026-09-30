@@ -110,3 +110,12 @@ groups:
           summary: Metric label cardinality elevated
           description: More than 500 distinct http_requests_total metric series detected, indicating potential route label cardinality leak.
 
+      - alert: ZKVotePriorityStarvation
+        expr: sum(increase(zkvote_priority_starvation_total{priority="CRITICAL"}[5m])) > 0
+        for: 1m
+        labels:
+          severity: critical
+          service: zkvote-relayer
+        annotations:
+          summary: Vote requests are waiting in the priority queue
+          description: At least one critical vote request exceeded the one-second queue wait threshold in the last five minutes.
